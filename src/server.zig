@@ -51,30 +51,33 @@ fn serverThreadFunc(context: *ServerContext) !void {
         std.debug.print("Failed to create an IPV4 TCP socket: {}\n", .{err});
         return;
     };
+    defer socket.close();
     try socket.bindToPort(9000);
     try socket.listen();
     var client: network.Socket = socket.accept() catch |err| {
         std.debug.print("Failed to accept a new client with {}. Giving up...\n", .{err});
         return;
     };
+    defer client.close();
 
     std.debug.print("Client connected: {}.\n", .{try client.getLocalEndPoint()});
 
-    mainServerThread(context, &socket) catch |err| {
+    mainServerThread(context, &client) catch |err| {
         std.debug.print("Client disconnected: {}\n", .{err});
     };
 }
 
-fn mainServerThread(context: *ServerContext, socket: *network.Socket) !void {
+fn mainServerThread(context: *ServerContext, client: *network.Socket) !void {
     var receive_offset: usize = 0;
     while (context.run) {
-        const len = try socket.receive(context.receive_buffer[receive_offset..]);
+        const len = try client.receive(context.receive_buffer[receive_offset..]);
         if (len == 0) {
             std.debug.print("Client disconnected. Exiting thread...\n", .{});
             break;
         }
 
         std.debug.print("got {} bytes...\n", .{len});
+        _ = try client.send(context.receive_buffer[receive_offset..len]);
 
         context.shared_message_buffer_lock.lock();
         // TODO process recieved messages, moving the leftover bytes to the beginning of the buffer

@@ -1,7 +1,8 @@
 const std = @import("std");
-const zgui = @import("libs/zgui/build.zig");
 const zglfw = @import("libs/zglfw/build.zig");
 const zgpu = @import("libs/zgpu/build.zig");
+const zgui = @import("libs/zgui/build.zig");
+const zmath = @import("libs/zmath/build.zig");
 const zpool = @import("libs/zpool/build.zig");
 const network = @import("libs/zig-network/build.zig");
 
@@ -22,6 +23,7 @@ pub fn build(b: *std.Build) void {
 
     // Needed for glfw/wgpu rendering backend
     const zglfw_pkg = zglfw.package(b, target, optimize, .{});
+    const zmath_pkg = zmath.package(b, target, optimize, .{});
     const zpool_pkg = zpool.package(b, target, optimize, .{});
     const zgpu_pkg = zgpu.package(b, target, optimize, .{
         .deps = .{ .zpool = zpool_pkg.zpool, .zglfw = zglfw_pkg.zglfw },
@@ -32,6 +34,7 @@ pub fn build(b: *std.Build) void {
     });
 
     zgui_pkg.link(exe_memview);
+    zmath_pkg.link(exe_memview);
     zglfw_pkg.link(exe_memview);
     zgpu_pkg.link(exe_memview);
     exe_memview.addModule("network", network_module);
