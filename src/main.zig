@@ -8,6 +8,9 @@ const wgpu = zgpu.wgpu;
 const server = @import("server.zig");
 const common = @import("common.zig");
 
+extern fn glfwSetWindowUserPointer(window: *zglfw.Window, ptr: *anyopaque) callconv(.C) void;
+extern fn glfwGetWindowUserPointer(window: *zglfw.Window) callconv(.C) *anyopaque;
+
 const ServerContext = server.ServerContext;
 
 // zig fmt: off
@@ -197,6 +200,8 @@ const AppContext = struct {
     server: ServerContext,
     all_messages: std.ArrayList(common.Message),
     new_messages: std.ArrayList(common.Message),
+    zoom: f32 = -3.0,
+    target_zoom: f32 = -3.0,
 };
 
 fn updateMessages(app: *AppContext) !void {
@@ -238,7 +243,7 @@ fn draw(app: *AppContext) void {
     const t = @floatCast(f32, gctx.stats.time);
 
     const cam_world_to_view = zm.lookAtLh(
-        zm.f32x4(0.0, 0.0, -3.0, 1.0),
+        zm.f32x4(0.0, 0.0, app.zoom, 1.0),
         zm.f32x4(0.0, 0.0, 0.0, 1.0),
         zm.f32x4(0.0, 1.0, 0.0, 0.0),
     );
@@ -328,6 +333,13 @@ fn draw(app: *AppContext) void {
     _ = gctx.present();
 }
 
+fn onScrolled(window: *zglfw.Window, xoffset: f64, yoffset: f64) callconv(.C) void {
+    _ = xoffset;
+
+    const app = @ptrCast(*AppContext, @alignCast(@alignOf(AppContext), glfwGetWindowUserPointer(window)));
+    app.target_zoom = std.math.clamp(app.target_zoom + @floatCast(f32, yoffset), -20.0, -1.0);
+}
+
 pub fn main() !void {
     zglfw.init() catch {
         std.log.err("Failed to initialize GLFW library.", .{});
@@ -341,6 +353,7 @@ pub fn main() !void {
     };
     defer window.destroy();
     window.setSizeLimits(400, 400, -1, -1);
+    window.setScrollCallback(onScrolled);
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     var allocator = gpa.allocator();
@@ -349,13 +362,13 @@ pub fn main() !void {
     var app = AppContext{
         .allocator = allocator,
         .gfx = try GfxState.init(window, allocator),
-        // .gctx = try zgpu.GraphicsContext.create(allocator, window),
         .server = try ServerContext.init(allocator),
 
         // temp
         .all_messages = std.ArrayList(common.Message).init(allocator),
         .new_messages = std.ArrayList(common.Message).init(allocator),
     };
+    glfwSetWindowUserPointer(window, &app);
 
     defer app.gfx.deinit();
     defer app.server.deinit();
@@ -385,6 +398,13 @@ pub fn main() !void {
             app.gfx.gctx.swapchain_descriptor.width,
             app.gfx.gctx.swapchain_descriptor.height,
         );
+
+        var zoom_diff = app.target_zoom - app.zoom;
+        if (zm.abs(zoom_diff) < 0.01) {
+            app.zoom = app.target_zoom;
+        } else {
+            app.zoom += 0.25 * zoom_diff;
+        }
 
         try updateMessages(&app);
         updateGui(&app);
