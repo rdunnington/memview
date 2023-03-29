@@ -36,6 +36,12 @@ ZGUI_API void zguiSetNextWindowSize(float w, float h, ImGuiCond cond) {
     ImGui::SetNextWindowSize({ w, h }, cond);
 }
 
+ZGUI_API void zguiSetNextWindowSizeConstraints(float minX, float minY, float maxX, float maxY) {
+    ImVec2 min = {minX, minY};
+    ImVec2 max = {maxX, maxY};
+    ImGui::SetNextWindowSizeConstraints(min, max);
+}
+
 ZGUI_API void zguiSetNextWindowCollapsed(bool collapsed, ImGuiCond cond) {
     ImGui::SetNextWindowCollapsed(collapsed, cond);
 }

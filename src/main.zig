@@ -13,6 +13,12 @@ extern fn glfwGetWindowUserPointer(window: *zglfw.Window) callconv(.C) *anyopaqu
 
 const ServerContext = server.ServerContext;
 
+// TODO need some simple drawing primitives:
+// * draw line
+// * draw rect
+// * draw monospace text
+// * scissor rect
+
 // zig fmt: off
 const wgsl_vs =
 \\  @group(0) @binding(0) var<uniform> object_to_clip: mat4x4<f32>;
@@ -20,10 +26,7 @@ const wgsl_vs =
 \\      @builtin(position) position_clip: vec4<f32>,
 \\      @location(0) color: vec3<f32>,
 \\  }
-\\  @stage(vertex) fn main(
-\\      @location(0) position: vec3<f32>,
-\\      @location(1) color: vec3<f32>,
-\\  ) -> VertexOut {
+\\  @stage(vertex) fn main(@location(0) position: vec3<f32>, @location(1) color: vec3<f32>) -> VertexOut {
 \\      var output: VertexOut;
 \\      output.position_clip = vec4(position, 1.0) * object_to_clip;
 \\      output.color = color;
@@ -32,9 +35,7 @@ const wgsl_vs =
 ;
 
 const wgsl_fs =
-\\  @stage(fragment) fn main(
-\\      @location(0) color: vec3<f32>,
-\\  ) -> @location(0) vec4<f32> {
+\\  @stage(fragment) fn main(@location(0) color: vec3<f32>) -> @location(0) vec4<f32> {
 \\      return vec4(color, 1.0);
 \\  }
 // zig fmt: on
@@ -70,12 +71,12 @@ const Vertex = struct {
 const GfxState = struct {
     gctx: *zgpu.GraphicsContext,
 
-    pipeline: zgpu.RenderPipelineHandle,
-    bind_group: zgpu.BindGroupHandle,
-    vertex_buffer: zgpu.BufferHandle,
-    index_buffer: zgpu.BufferHandle,
-    depth_texture: zgpu.TextureHandle,
-    depth_texture_view: zgpu.TextureViewHandle,
+    // pipeline: zgpu.RenderPipelineHandle,
+    // bind_group: zgpu.BindGroupHandle,
+    // vertex_buffer: zgpu.BufferHandle,
+    // index_buffer: zgpu.BufferHandle,
+    // depth_texture: zgpu.TextureHandle,
+    // depth_texture_view: zgpu.TextureViewHandle,
 
     allocator: std.mem.Allocator,
 
@@ -85,105 +86,101 @@ const GfxState = struct {
         /////////////////////////////////////////////////////////////////////////
         // lifted from https://github.com/michal-z/zig-gamedev/blob/main/samples/triangle_wgpu/src/triangle_wgpu.zig
         // Create a bind group layout needed for our render pipeline.
-        const bind_group_layout = gctx.createBindGroupLayout(&.{
-            zgpu.bufferEntry(0, .{ .vertex = true }, .uniform, true, 0),
-        });
-        defer gctx.releaseResource(bind_group_layout);
+        // const bind_group_layout = gctx.createBindGroupLayout(&.{
+        //     zgpu.bufferEntry(0, .{ .vertex = true }, .uniform, true, 0),
+        // });
+        // defer gctx.releaseResource(bind_group_layout);
 
-        const pipeline_layout = gctx.createPipelineLayout(&.{bind_group_layout});
-        defer gctx.releaseResource(pipeline_layout);
+        // const pipeline_layout = gctx.createPipelineLayout(&.{bind_group_layout});
+        // defer gctx.releaseResource(pipeline_layout);
 
-        const pipeline = pipline: {
-            const vs_module = zgpu.createWgslShaderModule(gctx.device, wgsl_vs, "vs");
-            defer vs_module.release();
+        // const pipeline = pipline: {
+        //     const vs_module = zgpu.createWgslShaderModule(gctx.device, wgsl_vs, "vs");
+        //     defer vs_module.release();
 
-            const fs_module = zgpu.createWgslShaderModule(gctx.device, wgsl_fs, "fs");
-            defer fs_module.release();
+        //     const fs_module = zgpu.createWgslShaderModule(gctx.device, wgsl_fs, "fs");
+        //     defer fs_module.release();
 
-            const color_targets = [_]wgpu.ColorTargetState{.{
-                .format = zgpu.GraphicsContext.swapchain_format,
-            }};
+        //     const color_targets = [_]wgpu.ColorTargetState{.{
+        //         .format = zgpu.GraphicsContext.swapchain_format,
+        //     }};
 
-            const vertex_attributes = [_]wgpu.VertexAttribute{
-                .{ .format = .float32x3, .offset = 0, .shader_location = 0 },
-                .{ .format = .float32x3, .offset = @offsetOf(Vertex, "color"), .shader_location = 1 },
-            };
-            const vertex_buffers = [_]wgpu.VertexBufferLayout{.{
-                .array_stride = @sizeOf(Vertex),
-                .attribute_count = vertex_attributes.len,
-                .attributes = &vertex_attributes,
-            }};
+        //     const vertex_attributes = [_]wgpu.VertexAttribute{
+        //         .{ .format = .float32x3, .offset = 0, .shader_location = 0 },
+        //         .{ .format = .float32x3, .offset = @offsetOf(Vertex, "color"), .shader_location = 1 },
+        //     };
+        //     const vertex_buffers = [_]wgpu.VertexBufferLayout{.{
+        //         .array_stride = @sizeOf(Vertex),
+        //         .attribute_count = vertex_attributes.len,
+        //         .attributes = &vertex_attributes,
+        //     }};
 
-            const pipeline_descriptor = wgpu.RenderPipelineDescriptor{
-                .vertex = wgpu.VertexState{
-                    .module = vs_module,
-                    .entry_point = "main",
-                    .buffer_count = vertex_buffers.len,
-                    .buffers = &vertex_buffers,
-                },
-                .primitive = wgpu.PrimitiveState{
-                    .front_face = .ccw,
-                    .cull_mode = .none,
-                    .topology = .triangle_list,
-                },
-                .depth_stencil = &wgpu.DepthStencilState{
-                    .format = .depth32_float,
-                    .depth_write_enabled = true,
-                    .depth_compare = .less,
-                },
-                .fragment = &wgpu.FragmentState{
-                    .module = fs_module,
-                    .entry_point = "main",
-                    .target_count = color_targets.len,
-                    .targets = &color_targets,
-                },
-            };
-            break :pipline gctx.createRenderPipeline(pipeline_layout, pipeline_descriptor);
-        };
+        //     const pipeline_descriptor = wgpu.RenderPipelineDescriptor{
+        //         .vertex = wgpu.VertexState{
+        //             .module = vs_module,
+        //             .entry_point = "main",
+        //             .buffer_count = vertex_buffers.len,
+        //             .buffers = &vertex_buffers,
+        //         },
+        //         .primitive = wgpu.PrimitiveState{
+        //             .front_face = .ccw,
+        //             .cull_mode = .none,
+        //             .topology = .triangle_list,
+        //         },
+        //         .depth_stencil = &wgpu.DepthStencilState{
+        //             .format = .depth32_float,
+        //             .depth_write_enabled = true,
+        //             .depth_compare = .less,
+        //         },
+        //         .fragment = &wgpu.FragmentState{
+        //             .module = fs_module,
+        //             .entry_point = "main",
+        //             .target_count = color_targets.len,
+        //             .targets = &color_targets,
+        //         },
+        //     };
+        //     break :pipline gctx.createRenderPipeline(pipeline_layout, pipeline_descriptor);
+        // };
 
-        const bind_group = gctx.createBindGroup(bind_group_layout, &[_]zgpu.BindGroupEntryInfo{
-            .{ .binding = 0, .buffer_handle = gctx.uniforms.buffer, .offset = 0, .size = @sizeOf(zm.Mat) },
-        });
+        // const bind_group = gctx.createBindGroup(bind_group_layout, &[_]zgpu.BindGroupEntryInfo{
+        //     .{ .binding = 0, .buffer_handle = gctx.uniforms.buffer, .offset = 0, .size = @sizeOf(zm.Mat) },
+        // });
 
-        // Create a vertex buffer.
-        const color = [3]f32{ 0.0, 1.0, 0.0 };
-        const vertex_data = [_]Vertex{
-            .{ .position = [3]f32{ -0.5, -0.5, 0.0 }, .color = color },
-            .{ .position = [3]f32{ 0.5, -0.5, 0.0 }, .color = color },
-            .{ .position = [3]f32{ 0.5, 0.5, 0.0 }, .color = color },
-            .{ .position = [3]f32{ -0.5, 0.5, 0.0 }, .color = color },
+        // // Vertex buffer for quads
+        // const color = [3]f32{ 0.0, 1.0, 0.0 };
+        // const vertex_data = [_]Vertex{
+        //     .{ .position = [3]f32{ -0.5, -0.5, 0.0 }, .color = color },
+        //     .{ .position = [3]f32{ 0.5, -0.5, 0.0 }, .color = color },
+        //     .{ .position = [3]f32{ 0.5, 0.5, 0.0 }, .color = color },
+        //     .{ .position = [3]f32{ -0.5, 0.5, 0.0 }, .color = color },
+        // };
+        // const vertex_buffer = gctx.createBuffer(.{
+        //     .usage = .{ .copy_dst = true, .vertex = true },
+        //     .size = vertex_data.len * @sizeOf(Vertex),
+        // });
+        // gctx.queue.writeBuffer(gctx.lookupResource(vertex_buffer).?, 0, Vertex, vertex_data[0..]);
 
-            // .{ .position = [3]f32{ 0.0, 0.5, 0.0 }, .color = [3]f32{ 1.0, 0.0, 0.0 } },
-            // .{ .position = [3]f32{ -0.5, -0.5, 0.0 }, .color = [3]f32{ 0.0, 1.0, 0.0 } },
-            // .{ .position = [3]f32{ 0.5, -0.5, 0.0 }, .color = [3]f32{ 0.0, 0.0, 1.0 } },
-        };
-        const vertex_buffer = gctx.createBuffer(.{
-            .usage = .{ .copy_dst = true, .vertex = true },
-            .size = vertex_data.len * @sizeOf(Vertex),
-        });
-        gctx.queue.writeBuffer(gctx.lookupResource(vertex_buffer).?, 0, Vertex, vertex_data[0..]);
+        // // Create an index buffer.
+        // const index_data = [_]u32{ 0, 1, 2, 2, 3, 0 };
+        // const index_buffer = gctx.createBuffer(.{
+        //     .usage = .{ .copy_dst = true, .index = true },
+        //     .size = index_data.len * @sizeOf(u32),
+        // });
+        // gctx.queue.writeBuffer(gctx.lookupResource(index_buffer).?, 0, u32, index_data[0..]);
 
-        // Create an index buffer.
-        const index_data = [_]u32{ 0, 1, 2, 2, 3, 0 };
-        const index_buffer = gctx.createBuffer(.{
-            .usage = .{ .copy_dst = true, .index = true },
-            .size = index_data.len * @sizeOf(u32),
-        });
-        gctx.queue.writeBuffer(gctx.lookupResource(index_buffer).?, 0, u32, index_data[0..]);
-
-        // Create a depth texture and its 'view'.
-        const depth = createDepthTexture(gctx);
+        // // Create a depth texture and its 'view'.
+        // const depth = createDepthTexture(gctx);
         /////////////////////////////////////////////////////////////////////////
 
         return GfxState{
             .gctx = gctx,
 
-            .pipeline = pipeline,
-            .bind_group = bind_group,
-            .vertex_buffer = vertex_buffer,
-            .index_buffer = index_buffer,
-            .depth_texture = depth.texture,
-            .depth_texture_view = depth.view,
+            // .pipeline = pipeline,
+            // .bind_group = bind_group,
+            // .vertex_buffer = vertex_buffer,
+            // .index_buffer = index_buffer,
+            // .depth_texture = depth.texture,
+            // .depth_texture_view = depth.view,
 
             .allocator = allocator,
         };
@@ -200,8 +197,50 @@ const AppContext = struct {
     server: ServerContext,
     all_messages: std.ArrayList(common.Message),
     new_messages: std.ArrayList(common.Message),
+    // draw_list: zgui.DrawList,
     zoom: f32 = -3.0,
     target_zoom: f32 = -3.0,
+
+    fn init(window: *zglfw.Window, allocator: std.mem.Allocator) !AppContext {
+        var gfx = try GfxState.init(window, allocator);
+
+        zgui.init(allocator);
+        zgui.backend.initWithConfig(
+            window,
+            gfx.gctx.device,
+            @enumToInt(zgpu.GraphicsContext.swapchain_format),
+            .{ .texture_filter_mode = .linear, .pipeline_multisample_count = 1 },
+        );
+        // var draw_list: zgui.DrawList = zgui.createDrawList();
+
+        {
+            const scale: [2]f32 = window.getContentScale();
+            const scale_factor: f32 = std.math.max(scale[0], scale[1]);
+            zgui.getStyle().scaleAllSizes(scale_factor);
+        }
+
+        var server_context = try ServerContext.init(allocator);
+        try server.spawnThread(&server_context);
+
+        return AppContext{
+            .allocator = allocator,
+            .gfx = gfx,
+            .server = server_context,
+            // .draw_list = draw_list,
+
+            // temp
+            .all_messages = std.ArrayList(common.Message).init(allocator),
+            .new_messages = std.ArrayList(common.Message).init(allocator),
+        };
+    }
+
+    fn deinit(self: *AppContext) void {
+        self.gfx.deinit();
+        // zgui.destroyDrawList(self.draw_list);
+        zgui.backend.deinit();
+        zgui.deinit();
+        self.server.deinit();
+    }
 };
 
 fn updateMessages(app: *AppContext) !void {
@@ -212,8 +251,11 @@ fn updateMessages(app: *AppContext) !void {
 fn updateGui(app: *AppContext) void {
     var gctx: *zgpu.GraphicsContext = app.gfx.gctx;
 
+    const backbuffer_width = @intToFloat(f32, gctx.swapchain_descriptor.width);
+    const backbuffer_height = @intToFloat(f32, gctx.swapchain_descriptor.height);
+
     zgui.setNextWindowPos(.{ .x = 0.0, .y = 0.0, .cond = .always });
-    zgui.setNextWindowSize(.{ .w = @intToFloat(f32, gctx.swapchain_descriptor.width), .h = -1.0, .cond = .always });
+    zgui.setNextWindowSize(.{ .w = backbuffer_width, .h = -1.0, .cond = .always });
 
     const title_bar_flags = zgui.WindowFlags{
         .no_title_bar = true,
@@ -221,6 +263,7 @@ fn updateGui(app: *AppContext) void {
         .no_move = true,
     };
 
+    var next_window_y: f32 = 0;
     if (zgui.begin("menu_bar", .{ .flags = title_bar_flags })) {
         zgui.textUnformattedColored(.{ 0, 0.8, 0, 1 }, "Average :");
         zgui.sameLine(.{});
@@ -228,8 +271,48 @@ fn updateGui(app: *AppContext) void {
             "{d:.3} ms/frame ({d:.1} fps)",
             .{ gctx.stats.average_cpu_time, gctx.stats.fps },
         );
+        next_window_y = zgui.getWindowHeight();
         zgui.end();
     }
+
+    zgui.setNextWindowPos(.{ .x = 0.0, .y = next_window_y, .cond = .always });
+    zgui.setNextWindowSize(.{ .w = backbuffer_width, .h = 200, .cond = .once });
+    zgui.setNextWindowSizeConstraints(.{ .minx = backbuffer_width, .maxx = backbuffer_width, .miny = 0, .maxy = backbuffer_height - next_window_y });
+
+    const call_tree_flags = zgui.WindowFlags{
+        .no_title_bar = true,
+        .no_resize = false,
+        .no_move = true,
+    };
+
+    if (zgui.begin("call_tree", .{ .flags = call_tree_flags })) {
+        zgui.textUnformatted("Call tree goes here");
+        if (zgui.treeNodeStrId("tree_id1", "My Tree {d}", .{1})) {
+            if (zgui.treeNodeStrId("tree_id2", "My Tree {d}", .{2})) {
+                zgui.textUnformatted("Some content...");
+                zgui.treePop();
+            }
+            zgui.treePop();
+        }
+        next_window_y += zgui.getWindowHeight();
+        zgui.end();
+    }
+
+    const draw_list = zgui.getBackgroundDrawList();
+    draw_list.pushClipRect(.{ .pmin = .{ 0, next_window_y }, .pmax = .{ backbuffer_width, backbuffer_height } });
+
+    draw_list.addRectFilled(
+        .{
+            .pmin = .{ 0, next_window_y },
+            .pmax = .{ backbuffer_width, backbuffer_height },
+            .col = zgui.colorConvertFloat3ToU32([_]f32{ 0.5, 0.5, 0 }),
+            .rounding = 0,
+        },
+    );
+    draw_list.addText(.{ 130, next_window_y + 20 }, 0xff_00_00_ff, "heyooooo {}", .{7});
+    draw_list.addTextUnformatted(.{ 130, next_window_y + 40 }, 0xff_00_00_ff, "heyooooo 2");
+
+    draw_list.popClipRect();
 }
 
 fn draw(app: *AppContext) void {
@@ -238,85 +321,85 @@ fn draw(app: *AppContext) void {
     const back_buffer_view = gctx.swapchain.getCurrentTextureView();
     defer back_buffer_view.release();
 
-    const fb_width = gctx.swapchain_descriptor.width;
-    const fb_height = gctx.swapchain_descriptor.height;
-    const t = @floatCast(f32, gctx.stats.time);
+    // const fb_width = gctx.swapchain_descriptor.width;
+    // const fb_height = gctx.swapchain_descriptor.height;
+    // const t = @floatCast(f32, gctx.stats.time);
 
-    const cam_world_to_view = zm.lookAtLh(
-        zm.f32x4(0.0, 0.0, app.zoom, 1.0),
-        zm.f32x4(0.0, 0.0, 0.0, 1.0),
-        zm.f32x4(0.0, 1.0, 0.0, 0.0),
-    );
+    // const cam_world_to_view = zm.lookAtLh(
+    //     zm.f32x4(0.0, 0.0, app.zoom, 1.0),
+    //     zm.f32x4(0.0, 0.0, 0.0, 1.0),
+    //     zm.f32x4(0.0, 1.0, 0.0, 0.0),
+    // );
 
-    const cam_view_to_clip = zm.perspectiveFovLh(
-        0.25 * std.math.pi,
-        @intToFloat(f32, fb_width) / @intToFloat(f32, fb_height),
-        0.01,
-        200.0,
-    );
-    const cam_world_to_clip = zm.mul(cam_world_to_view, cam_view_to_clip);
+    // const cam_view_to_clip = zm.perspectiveFovLh(
+    //     0.25 * std.math.pi,
+    //     @intToFloat(f32, fb_width) / @intToFloat(f32, fb_height),
+    //     0.01,
+    //     200.0,
+    // );
+    // const cam_world_to_clip = zm.mul(cam_world_to_view, cam_view_to_clip);
 
     const commands = commands: {
         const encoder = gctx.device.createCommandEncoder(null);
         defer encoder.release();
 
         // shapes pass
-        {
-            const vb_info = gctx.lookupResourceInfo(app.gfx.vertex_buffer) orelse unreachable;
-            const ib_info = gctx.lookupResourceInfo(app.gfx.index_buffer) orelse unreachable;
-            const pipeline = gctx.lookupResource(app.gfx.pipeline) orelse unreachable;
-            const bind_group = gctx.lookupResource(app.gfx.bind_group) orelse unreachable;
-            const depth_view = gctx.lookupResource(app.gfx.depth_texture_view) orelse unreachable;
+        // {
+        //     const vb_info = gctx.lookupResourceInfo(app.gfx.vertex_buffer) orelse unreachable;
+        //     const ib_info = gctx.lookupResourceInfo(app.gfx.index_buffer) orelse unreachable;
+        //     const pipeline = gctx.lookupResource(app.gfx.pipeline) orelse unreachable;
+        //     const bind_group = gctx.lookupResource(app.gfx.bind_group) orelse unreachable;
+        //     const depth_view = gctx.lookupResource(app.gfx.depth_texture_view) orelse unreachable;
 
-            const color_attachments = [_]wgpu.RenderPassColorAttachment{.{
-                .view = back_buffer_view,
-                .load_op = .clear,
-                .store_op = .store,
-            }};
-            const depth_attachment = wgpu.RenderPassDepthStencilAttachment{
-                .view = depth_view,
-                .depth_load_op = .clear,
-                .depth_store_op = .store,
-                .depth_clear_value = 1.0,
-            };
-            const render_pass_info = wgpu.RenderPassDescriptor{
-                .color_attachment_count = color_attachments.len,
-                .color_attachments = &color_attachments,
-                .depth_stencil_attachment = &depth_attachment,
-            };
+        //     const color_attachments = [_]wgpu.RenderPassColorAttachment{.{
+        //         .view = back_buffer_view,
+        //         .load_op = .clear,
+        //         .store_op = .store,
+        //     }};
+        //     const depth_attachment = wgpu.RenderPassDepthStencilAttachment{
+        //         .view = depth_view,
+        //         .depth_load_op = .clear,
+        //         .depth_store_op = .store,
+        //         .depth_clear_value = 1.0,
+        //     };
+        //     const render_pass_info = wgpu.RenderPassDescriptor{
+        //         .color_attachment_count = color_attachments.len,
+        //         .color_attachments = &color_attachments,
+        //         .depth_stencil_attachment = &depth_attachment,
+        //     };
 
-            const pass = encoder.beginRenderPass(render_pass_info);
-            defer zgpu.endReleasePass(pass);
+        //     const pass = encoder.beginRenderPass(render_pass_info);
+        //     defer zgpu.endReleasePass(pass);
 
-            pass.setVertexBuffer(0, vb_info.gpuobj.?, 0, vb_info.size);
-            pass.setIndexBuffer(ib_info.gpuobj.?, .uint32, 0, ib_info.size);
+        //     pass.setVertexBuffer(0, vb_info.gpuobj.?, 0, vb_info.size);
+        //     pass.setIndexBuffer(ib_info.gpuobj.?, .uint32, 0, ib_info.size);
 
-            pass.setPipeline(pipeline);
+        //     pass.setPipeline(pipeline);
 
-            // Draw triangle 1.
-            {
-                const object_to_world = zm.identity(); //zm.mul(zm.rotationY(t), zm.translation(-1.0, 0.0, 0.0));
-                const object_to_clip = zm.mul(object_to_world, cam_world_to_clip);
+        //     // Draw triangle 1.
+        //     {
+        //         const object_to_world = zm.identity(); //zm.mul(zm.rotationY(t), zm.translation(-1.0, 0.0, 0.0));
+        //         const object_to_clip = zm.mul(object_to_world, cam_world_to_clip);
 
-                const mem = gctx.uniformsAllocate(zm.Mat, 1);
-                mem.slice[0] = zm.transpose(object_to_clip);
+        //         const mem = gctx.uniformsAllocate(zm.Mat, 1);
+        //         mem.slice[0] = zm.transpose(object_to_clip);
 
-                pass.setBindGroup(0, bind_group, &.{mem.offset});
-                pass.drawIndexed(6, 1, 0, 0, 0);
-            }
+        //         pass.setBindGroup(0, bind_group, &.{mem.offset});
+        //         pass.drawIndexed(6, 1, 0, 0, 0);
+        //     }
 
-            // Draw triangle 2.
-            {
-                const object_to_world = zm.mul(zm.rotationY(0.75 * t), zm.translation(1.0, 0.0, 0.0));
-                const object_to_clip = zm.mul(object_to_world, cam_world_to_clip);
+        //     // Draw triangle 2.
+        //     {
+        //         const object_to_world = zm.mul(zm.rotationY(0.75 * t), zm.translation(1.0, 0.0, 0.0));
+        //         const object_to_clip = zm.mul(object_to_world, cam_world_to_clip);
 
-                const mem = gctx.uniformsAllocate(zm.Mat, 1);
-                mem.slice[0] = zm.transpose(object_to_clip);
+        //         const mem = gctx.uniformsAllocate(zm.Mat, 1);
+        //         mem.slice[0] = zm.transpose(object_to_clip);
 
-                pass.setBindGroup(0, bind_group, &.{mem.offset});
-                pass.drawIndexed(6, 1, 0, 0, 0);
-            }
-        }
+        //         pass.setBindGroup(0, bind_group, &.{mem.offset});
+        //         pass.drawIndexed(6, 1, 0, 0, 0);
+        //     }
+        // }
 
         // zgui pass
         {
@@ -359,38 +442,9 @@ pub fn main() !void {
     var allocator = gpa.allocator();
     defer _ = gpa.deinit();
 
-    var app = AppContext{
-        .allocator = allocator,
-        .gfx = try GfxState.init(window, allocator),
-        .server = try ServerContext.init(allocator),
-
-        // temp
-        .all_messages = std.ArrayList(common.Message).init(allocator),
-        .new_messages = std.ArrayList(common.Message).init(allocator),
-    };
+    var app = try AppContext.init(window, allocator);
+    defer app.deinit();
     glfwSetWindowUserPointer(window, &app);
-
-    defer app.gfx.deinit();
-    defer app.server.deinit();
-
-    zgui.init(allocator);
-    defer zgui.deinit();
-
-    zgui.backend.initWithConfig(
-        window,
-        app.gfx.gctx.device,
-        @enumToInt(zgpu.GraphicsContext.swapchain_format),
-        .{ .texture_filter_mode = .linear, .pipeline_multisample_count = 1 },
-    );
-    defer zgui.backend.deinit();
-
-    {
-        const scale: [2]f32 = window.getContentScale();
-        const scale_factor: f32 = std.math.max(scale[0], scale[1]);
-        zgui.getStyle().scaleAllSizes(scale_factor);
-    }
-
-    try server.spawnThread(&app.server);
 
     while (!window.shouldClose() and window.getKey(.escape) != .press) {
         zglfw.pollEvents();

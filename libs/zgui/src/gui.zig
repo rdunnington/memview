@@ -563,6 +563,17 @@ pub fn setNextWindowSize(args: SetNextWindowSize) void {
 }
 extern fn zguiSetNextWindowSize(w: f32, h: f32, cond: Condition) void;
 //--------------------------------------------------------------------------------------------------
+const SetNextWindowSizeConstraints = struct {
+    minx: f32 = -1.0,
+    miny: f32 = -1.0,
+    maxx: f32 = -1.0,
+    maxy: f32 = -1.0,
+};
+pub fn setNextWindowSizeConstraints(args: SetNextWindowSizeConstraints) void {
+    zguiSetNextWindowSizeConstraints(args.minx, args.miny, args.maxx, args.maxy);
+}
+extern fn zguiSetNextWindowSizeConstraints(minX: f32, minY: f32, maxX: f32, maxY: f32) void;
+//--------------------------------------------------------------------------------------------------
 const SetNextWindowCollapsed = struct {
     collapsed: bool,
     cond: Condition = .none,
