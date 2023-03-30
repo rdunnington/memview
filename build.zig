@@ -32,12 +32,16 @@ pub fn build(b: *std.Build) void {
     const network_module = b.addModule("network", .{
         .source_file = .{ .path = "libs/zig-network/network.zig" },
     });
+    const stable_array_module = b.addModule("stable_array", .{
+        .source_file = .{ .path = "libs/zig-stable-array/stable_array.zig" },
+    });
 
     zgui_pkg.link(exe_memview);
     zmath_pkg.link(exe_memview);
     zglfw_pkg.link(exe_memview);
     zgpu_pkg.link(exe_memview);
     exe_memview.addModule("network", network_module);
+    exe_memview.addModule("stable_array", stable_array_module);
 
     // This declares intent for the exe_memviewcutable to be installed into the
     // standard location when the user invokes the "install" step (the default

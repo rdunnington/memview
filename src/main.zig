@@ -5,13 +5,13 @@ const zgpu = @import("zgpu");
 const zm = @import("zmath");
 const wgpu = zgpu.wgpu;
 
-const server = @import("server.zig");
+const client = @import("client.zig");
 const common = @import("common.zig");
 
 extern fn glfwSetWindowUserPointer(window: *zglfw.Window, ptr: *anyopaque) callconv(.C) void;
 extern fn glfwGetWindowUserPointer(window: *zglfw.Window) callconv(.C) *anyopaque;
 
-const ServerContext = server.ServerContext;
+const ClientContext = client.ClientContext;
 
 const GfxState = struct {
     gctx: *zgpu.GraphicsContext,
@@ -35,7 +35,7 @@ const GfxState = struct {
 const AppContext = struct {
     allocator: std.mem.Allocator,
     gfx: GfxState,
-    server: ServerContext,
+    client: ClientContext,
     all_messages: std.ArrayList(common.Message),
     new_messages: std.ArrayList(common.Message),
     zoom: f32 = -3.0,
@@ -58,13 +58,13 @@ const AppContext = struct {
             zgui.getStyle().scaleAllSizes(scale_factor);
         }
 
-        var server_context = try ServerContext.init(allocator);
-        try server.spawnThread(&server_context);
+        var client_context = try ClientContext.init(allocator);
+        try client.spawnThread(&client_context);
 
         return AppContext{
             .allocator = allocator,
             .gfx = gfx,
-            .server = server_context,
+            .client = client_context,
 
             .all_messages = std.ArrayList(common.Message).init(allocator),
             .new_messages = std.ArrayList(common.Message).init(allocator),
@@ -75,13 +75,22 @@ const AppContext = struct {
         self.gfx.deinit();
         zgui.backend.deinit();
         zgui.deinit();
-        self.server.deinit();
+        self.client.deinit();
     }
 };
 
 fn updateMessages(app: *AppContext) !void {
-    try server.fetchMessages(&app.server, &app.new_messages);
+    try client.fetchMessages(&app.client, &app.new_messages);
+    // temp for debugging
+    if (app.new_messages.items.len > 0) {
+        std.debug.print(">>> main thread got messages:\n", .{});
+        for (app.new_messages.items) |msg| {
+            std.debug.print("\t{any}\n", .{msg});
+        }
+    }
+    // temp for debugging
     try app.all_messages.appendSlice(app.new_messages.items);
+    app.new_messages.clearRetainingCapacity();
 }
 
 fn updateGui(app: *AppContext) void {
@@ -137,14 +146,14 @@ fn updateGui(app: *AppContext) void {
     const draw_list = zgui.getBackgroundDrawList();
     draw_list.pushClipRect(.{ .pmin = .{ 0, next_window_y }, .pmax = .{ backbuffer_width, backbuffer_height } });
 
-    draw_list.addRectFilled(
-        .{
-            .pmin = .{ 0, next_window_y },
-            .pmax = .{ backbuffer_width, backbuffer_height },
-            .col = zgui.colorConvertFloat3ToU32([_]f32{ 0.5, 0.5, 0 }),
-            .rounding = 0,
-        },
-    );
+    // draw_list.addRectFilled(
+    //     .{
+    //         .pmin = .{ 0, next_window_y },
+    //         .pmax = .{ backbuffer_width, backbuffer_height },
+    //         .col = zgui.colorConvertFloat3ToU32([_]f32{ 0.5, 0.5, 0 }),
+    //         .rounding = 0,
+    //     },
+    // );
     draw_list.addText(.{ 130, next_window_y + 20 }, 0xff_00_00_ff, "heyooooo {}", .{7});
     draw_list.addTextUnformatted(.{ 130, next_window_y + 40 }, 0xff_00_00_ff, "heyooooo 2");
 
@@ -225,5 +234,5 @@ pub fn main() !void {
         draw(&app);
     }
 
-    server.joinThread(&app.server);
+    client.joinThread(&app.client);
 }
