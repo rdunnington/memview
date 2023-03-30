@@ -4,3 +4,6 @@
 [submodule "libs/zig-network"]
 	path = libs/zig-network
 	url = https://github.com/MasterQ32/zig-network.git
+[submodule "libs/zig-stable-array"]
+	path = libs/zig-stable-array
+	url = https://github.com/rdunnington/zig-stable-array.git
