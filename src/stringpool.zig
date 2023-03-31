@@ -52,9 +52,12 @@ pub fn put(self: *StringPool, str: []const u8) ![]const u8 {
     return str_bytes;
 }
 
-pub fn find(self: *StringPool, str: []const u8) ?[]const u8 {
+pub fn find(self: *const StringPool, str: []const u8) ?[]const u8 {
     const hash: u64 = hashString(str);
+    return self.findByHash(hash);
+}
 
+pub fn findByHash(self: *const StringPool, hash: u64) ?[]const u8 {
     if (self.lookup.get(hash)) |string_bytes_begin| {
         var str_bytes: [*]u8 = self.buffer.items[string_bytes_begin..].ptr;
         var str_len: *StringLenType = @ptrCast(*StringLenType, @alignCast(@alignOf(StringLenType), str_bytes));

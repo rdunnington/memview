@@ -8,6 +8,7 @@ pub const MessageType = enum(u8) {
     Region,
     Frame,
     Alloc,
+    Free,
 };
 
 // Used for strings such as regions and callstacks
@@ -19,6 +20,7 @@ pub const Identifier = struct {
     }
 };
 
+// TODO rename to Allocator
 pub const Region = struct {
     id_hash: u64, // name
     address: u64,
@@ -37,27 +39,34 @@ pub const Alloc = struct {
     region: u64,
 };
 
+pub const Free = struct {
+    address: u64,
+    timestamp: u64,
+};
+
 pub const Message = union(MessageType) {
     Identifier: Identifier,
     Region: Region,
     Frame: Frame,
     Alloc: Alloc,
+    Free: Free,
 
     pub fn calcTotalSize(self: *const Message) usize {
         return self.calcBodySize() + 1 + 2; // 1 byte for size, 2 bytes for body length
     }
 
     fn calcBodySize(self: *const Message) usize {
-        return switch (self) {
-            .Identifier => |v| v.str.len + @sizeOf(u16), // identifier lengths are never longer than a u16 can hold
+        return switch (self.*) {
+            .Identifier => |v| v.name.len + @sizeOf(u16), // identifier lengths are never longer than a u16 can hold
             .Region => @sizeOf(u64) * 3,
             .Frame => @sizeOf(u64),
             .Alloc => @sizeOf(u64) * 5,
+            .Free => @sizeOf(u64) * 2,
         };
     }
 
     // returns number of messages written to the buffer
-    pub fn write(self: *const Message, buffer: std.ArrayList(u8)) void {
+    pub fn write(self: *const Message, buffer: *std.ArrayList(u8)) void {
         // var fbs = std.io.fixedBufferStream(buffer);
         var writer = buffer.writer();
 
@@ -77,18 +86,18 @@ pub const Message = union(MessageType) {
 
         const msg_size = @intCast(u16, self.calcBodySize());
 
-        writer.writeByte(@enumToInt(std.meta.activeTag(self))) catch unreachable;
+        writer.writeByte(@enumToInt(std.meta.activeTag(self.*))) catch unreachable;
         writer.writeIntLittle(u16, msg_size) catch unreachable;
 
         // const pos = fbs.pos;
 
-        switch (self) {
+        switch (self.*) {
             .Identifier => |v| {
                 writer.writeIntLittle(u16, @intCast(u16, v.name.len)) catch unreachable;
-                writer.write(v.name) catch unreachable;
+                _ = writer.write(v.name) catch unreachable;
             },
             .Region => |v| {
-                writer.writeIntLittle(u64, v.id) catch unreachable;
+                writer.writeIntLittle(u64, v.id_hash) catch unreachable;
                 writer.writeIntLittle(u64, v.address) catch unreachable;
                 writer.writeIntLittle(u64, v.size) catch unreachable;
             },
@@ -96,11 +105,15 @@ pub const Message = union(MessageType) {
                 writer.writeIntLittle(u64, v.timestamp) catch unreachable;
             },
             .Alloc => |v| {
-                writer.writeIntLittle(u64, v.callstack_id) catch unreachable;
+                writer.writeIntLittle(u64, v.id_hash) catch unreachable;
                 writer.writeIntLittle(u64, v.address) catch unreachable;
                 writer.writeIntLittle(u64, v.size) catch unreachable;
                 writer.writeIntLittle(u64, v.timestamp) catch unreachable;
                 writer.writeIntLittle(u64, v.region) catch unreachable;
+            },
+            .Free => |v| {
+                writer.writeIntLittle(u64, v.address) catch unreachable;
+                writer.writeIntLittle(u64, v.timestamp) catch unreachable;
             },
         }
 
@@ -174,6 +187,16 @@ pub const Message = union(MessageType) {
                             .size = size,
                             .timestamp = timestamp,
                             .region = region,
+                        },
+                    };
+                },
+                .Free => {
+                    const address = reader.readIntLittle(u64) catch unreachable;
+                    const timestamp = reader.readIntLittle(u64) catch unreachable;
+                    msg = Message{
+                        .Free = .{
+                            .address = address,
+                            .timestamp = timestamp,
                         },
                     };
                 },
