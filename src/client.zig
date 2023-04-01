@@ -55,42 +55,40 @@ pub fn fetchMessages(context: *ClientContext, fetched: *std.ArrayList(Message)) 
 }
 
 fn clientThreadFunc(context: *ClientContext) !void {
-    var socket = network.Socket.create(.ipv4, .tcp) catch |err| {
-        std.debug.print("Failed to create an IPV4 TCP socket: {}\n", .{err});
-        return;
-    };
-    defer socket.close();
-    try socket.bindToPort(9000);
-    try socket.listen();
-    var client: network.Socket = socket.accept() catch |err| {
-        std.debug.print("Failed to accept a new client with {}. Giving up...\n", .{err});
-        return;
-    };
-    defer client.close();
+    var socket: ?network.Socket = null;
+    while (socket == null) {
+        socket = network.connectToHost(std.heap.page_allocator, "localhost", 8080, .tcp) catch null;
+    }
+    defer socket.?.close();
 
-    std.debug.print("Client connected: {}.\n", .{try client.getLocalEndPoint()});
-
-    mainClientThread(context, &client) catch |err| {
-        std.debug.print("Client disconnected: {}\n", .{err});
+    std.debug.print("Connected to host at: {}.\n", .{try socket.?.getRemoteEndPoint()});
+    mainClientThread(context, &(socket.?)) catch |err| {
+        std.debug.print("Client disconnected with {}. Exiting thread...\n", .{err});
     };
 }
 
 fn mainClientThread(context: *ClientContext, client: *network.Socket) !void {
+    var begin_offset: usize = 0;
     while (context.run) {
-        const recieved_bytes = try client.receive(context.receive_buffer);
-        if (recieved_bytes == 0) {
+        const receive_buffer = context.receive_buffer[begin_offset..];
+        const received_bytes = try client.receive(receive_buffer);
+        if (received_bytes == 0) {
             std.debug.print("Client disconnected. Exiting thread...\n", .{});
             break;
         }
 
-        std.debug.print("got {} bytes...\n", .{recieved_bytes});
+        std.debug.print("got {} bytes...\n", .{received_bytes});
 
         context.shared_message_buffer_lock.lock();
-        const read_bytes = try Message.read(context.receive_buffer, &context.shared_message_buffer, &context.stringpool);
+        const concatenated_receive_slice = context.receive_buffer[0 .. begin_offset + received_bytes];
+        const read_bytes = try Message.read(concatenated_receive_slice, &context.shared_message_buffer, &context.stringpool);
         context.shared_message_buffer_lock.unlock();
 
-        if (read_bytes < recieved_bytes) {
-            unreachable;
-        }
+        var leftover_bytes: usize = concatenated_receive_slice.len - read_bytes;
+        var dest = context.receive_buffer[0..leftover_bytes];
+        var src = concatenated_receive_slice[read_bytes..concatenated_receive_slice.len];
+        std.mem.copy(u8, dest, src);
+
+        begin_offset = leftover_bytes;
     }
 }

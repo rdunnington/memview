@@ -11,6 +11,7 @@ pub fn main() !void {
     var memview_host = try memview.HostContext.init(memview_buffer, .{});
     defer memview_host.deinit();
 
+    std.debug.print("waiting for client connection...\n", .{});
     memview_host.waitForConnection();
 
     var allocator = memview_host.instrument(gpa_allocator).?;
@@ -23,8 +24,15 @@ pub fn main() !void {
     defer paragraphs.deinit();
     try paragraphs.ensureTotalCapacity(256);
 
+    if (args.len <= 1) {
+        std.debug.print("Usage: {s} <filepath>\n", .{args[0]});
+        return;
+    }
+
     var file_data = try std.fs.cwd().readFileAlloc(allocator, args[1], 1024 * 1024 * 8);
     defer allocator.free(file_data);
+
+    memview_host.pumpMsgQueue();
 
     var iter = std.mem.tokenize(u8, file_data, "\n");
     while (iter.next()) |bytes| {
@@ -50,9 +58,15 @@ pub fn main() !void {
                 paragraphs.items[shortest_paragraph_index] = try allocator.dupe(u8, bytes);
             }
         }
+
+        memview_host.pumpMsgQueue();
     }
 
     for (paragraphs.items) |para| {
         allocator.free(para);
+
+        memview_host.pumpMsgQueue();
     }
+
+    memview_host.pumpMsgQueue();
 }

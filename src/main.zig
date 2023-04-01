@@ -41,13 +41,19 @@ const AppContext = struct {
     zoom: f32 = -3.0,
     target_zoom: f32 = -3.0,
 
-    fn init(window: *zglfw.Window, allocator: std.mem.Allocator) !AppContext {
-        var gfx = try GfxState.init(window, allocator);
+    fn init(window: *zglfw.Window, allocator: std.mem.Allocator) !*AppContext {
+        var app = try allocator.create(AppContext);
+        app.gfx = try GfxState.init(window, allocator);
+        app.client = try ClientContext.init(allocator);
+        app.all_messages = std.ArrayList(common.Message).init(allocator);
+        app.new_messages = std.ArrayList(common.Message).init(allocator);
+        app.zoom = -3.0;
+        app.target_zoom = 3.0;
 
         zgui.init(allocator);
         zgui.backend.initWithConfig(
             window,
-            gfx.gctx.device,
+            app.gfx.gctx.device,
             @enumToInt(zgpu.GraphicsContext.swapchain_format),
             .{ .texture_filter_mode = .linear, .pipeline_multisample_count = 1 },
         );
@@ -58,17 +64,9 @@ const AppContext = struct {
             zgui.getStyle().scaleAllSizes(scale_factor);
         }
 
-        var client_context = try ClientContext.init(allocator);
-        try client.spawnThread(&client_context);
+        try client.spawnThread(&app.client);
 
-        return AppContext{
-            .allocator = allocator,
-            .gfx = gfx,
-            .client = client_context,
-
-            .all_messages = std.ArrayList(common.Message).init(allocator),
-            .new_messages = std.ArrayList(common.Message).init(allocator),
-        };
+        return app;
     }
 
     fn deinit(self: *AppContext) void {
@@ -82,12 +80,12 @@ const AppContext = struct {
 fn updateMessages(app: *AppContext) !void {
     try client.fetchMessages(&app.client, &app.new_messages);
     // temp for debugging
-    if (app.new_messages.items.len > 0) {
-        std.debug.print(">>> main thread got messages:\n", .{});
-        for (app.new_messages.items) |msg| {
-            std.debug.print("\t{any}\n", .{msg});
-        }
-    }
+    // if (app.new_messages.items.len > 0) {
+    // std.debug.print(">>> main thread got {} messages:\n", .{app.new_messages.items.len});
+    //     for (app.new_messages.items) |msg| {
+    //         std.debug.print("\t{any}\n", .{msg});
+    //     }
+    // }
     // temp for debugging
     try app.all_messages.appendSlice(app.new_messages.items);
     app.new_messages.clearRetainingCapacity();
@@ -212,8 +210,10 @@ pub fn main() !void {
     defer _ = gpa.deinit();
 
     var app = try AppContext.init(window, allocator);
+    defer allocator.destroy(app);
     defer app.deinit();
-    glfwSetWindowUserPointer(window, &app);
+
+    glfwSetWindowUserPointer(window, app);
 
     while (!window.shouldClose() and window.getKey(.escape) != .press) {
         zglfw.pollEvents();
@@ -229,9 +229,9 @@ pub fn main() !void {
             app.zoom += 0.25 * zoom_diff;
         }
 
-        try updateMessages(&app);
-        updateGui(&app);
-        draw(&app);
+        try updateMessages(app);
+        updateGui(app);
+        draw(app);
     }
 
     client.joinThread(&app.client);

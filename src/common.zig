@@ -65,31 +65,13 @@ pub const Message = union(MessageType) {
         };
     }
 
-    // returns number of messages written to the buffer
     pub fn write(self: *const Message, buffer: *std.ArrayList(u8)) void {
-        // var fbs = std.io.fixedBufferStream(buffer);
         var writer = buffer.writer();
-
-        // var messages_written: u32 = 0;
-
-        // for (messages) |*msg| {
-        //     const msg_size: usize = msg.calcSize();
-        //     const msg_and_header_size = msg_size + @sizeOf(u8) + @sizeOf(u16);
-        //     const buffer_bytes_left = fbs.getEndPos() - fbs.pos;
-        //     if (buffer_bytes_left < msg_and_header_size) {
-        //         return messages_written;
-        //     }
-
-        //     if (msg_size > std.math.maxInt(u16)) {
-        //         unreachable;
-        //     }
 
         const msg_size = @intCast(u16, self.calcBodySize());
 
         writer.writeByte(@enumToInt(std.meta.activeTag(self.*))) catch unreachable;
         writer.writeIntLittle(u16, msg_size) catch unreachable;
-
-        // const pos = fbs.pos;
 
         switch (self.*) {
             .Identifier => |v| {
@@ -116,14 +98,6 @@ pub const Message = union(MessageType) {
                 writer.writeIntLittle(u64, v.timestamp) catch unreachable;
             },
         }
-
-        //     messages_written += 1;
-
-        //     const actual_msg_size = fbs.pos - pos;
-        //     std.debug.assert(msg_size == actual_msg_size);
-        // }
-
-        // return fbs.pos;
     }
 
     pub fn read(buffer: []u8, messages: *std.ArrayList(Message), strpool: *StringPool) !usize {
@@ -133,7 +107,9 @@ pub const Message = union(MessageType) {
         var consumed_bytes: usize = 0;
 
         while (true) {
-            const msg_type = @intToEnum(MessageType, reader.readByte() catch unreachable);
+            const msg_type_raw = reader.readByte() catch break;
+            std.debug.print("found raw msg type {} at offset {}\n", .{ msg_type_raw, fbs.pos - 1 });
+            const msg_type = @intToEnum(MessageType, msg_type_raw);
             const msg_size = reader.readIntLittle(u16) catch break;
             if (buffer.len - fbs.pos < msg_size) {
                 break;
@@ -143,10 +119,10 @@ pub const Message = union(MessageType) {
 
             switch (msg_type) {
                 .Identifier => {
-                    const strlen = reader.readIntLittle(u16) catch unreachable;
+                    const strlen = reader.readIntLittle(u16) catch break;
                     const str = fbs.buffer[fbs.pos .. fbs.pos + strlen];
                     const strpool_str = try strpool.put(str);
-                    fbs.seekBy(strlen) catch unreachable;
+                    fbs.seekBy(strlen) catch break;
 
                     msg = Message{
                         .Identifier = .{
@@ -155,9 +131,9 @@ pub const Message = union(MessageType) {
                     };
                 },
                 .Region => {
-                    const id_hash = reader.readIntLittle(u64) catch unreachable;
-                    const address = reader.readIntLittle(u64) catch unreachable;
-                    const size = reader.readIntLittle(u64) catch unreachable;
+                    const id_hash = reader.readIntLittle(u64) catch break;
+                    const address = reader.readIntLittle(u64) catch break;
+                    const size = reader.readIntLittle(u64) catch break;
                     msg = Message{
                         .Region = .{
                             .id_hash = id_hash,
@@ -167,7 +143,7 @@ pub const Message = union(MessageType) {
                     };
                 },
                 .Frame => {
-                    const timestamp = reader.readIntLittle(u64) catch unreachable;
+                    const timestamp = reader.readIntLittle(u64) catch break;
                     msg = Message{
                         .Frame = .{
                             .timestamp = timestamp,
@@ -175,11 +151,11 @@ pub const Message = union(MessageType) {
                     };
                 },
                 .Alloc => {
-                    const callstack_id = reader.readIntLittle(u64) catch unreachable;
-                    const address = reader.readIntLittle(u64) catch unreachable;
-                    const size = reader.readIntLittle(u64) catch unreachable;
-                    const timestamp = reader.readIntLittle(u64) catch unreachable;
-                    const region = reader.readIntLittle(u64) catch unreachable;
+                    const callstack_id = reader.readIntLittle(u64) catch break;
+                    const address = reader.readIntLittle(u64) catch break;
+                    const size = reader.readIntLittle(u64) catch break;
+                    const timestamp = reader.readIntLittle(u64) catch break;
+                    const region = reader.readIntLittle(u64) catch break;
                     msg = Message{
                         .Alloc = .{
                             .id_hash = callstack_id,
@@ -191,8 +167,8 @@ pub const Message = union(MessageType) {
                     };
                 },
                 .Free => {
-                    const address = reader.readIntLittle(u64) catch unreachable;
-                    const timestamp = reader.readIntLittle(u64) catch unreachable;
+                    const address = reader.readIntLittle(u64) catch break;
+                    const timestamp = reader.readIntLittle(u64) catch break;
                     msg = Message{
                         .Free = .{
                             .address = address,
@@ -202,6 +178,8 @@ pub const Message = union(MessageType) {
                 },
             }
 
+            // std.debug.print("got msg: {}\n", .{msg});
+
             try messages.append(msg);
 
             consumed_bytes = fbs.pos;
@@ -210,12 +188,3 @@ pub const Message = union(MessageType) {
         return consumed_bytes;
     }
 };
-
-// need a stringpool to hold names
-// need a mapping of u64 id -> stringpool string (maybe add findByHash() func for stringpool)
-
-// const DefMappings = struct {
-//     regions: std.AutoHashMap(u64, []const u8),
-//     bookmarks: std.AutoHashMap(u64, []const u8),
-//     regions: std.AutoHashMap(Identifier),
-// };

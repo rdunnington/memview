@@ -121,15 +121,18 @@ pub const HostContext = struct {
         var context: *HostContext = allocator.create(HostContext) catch unreachable;
         context.instrumented_allocators_lock = std.Thread.Mutex{};
         context.instrumented_allocators = std.ArrayList(InstrumentedAllocator).init(allocator);
-        context.instrumented_allocators.ensureTotalCapacity(opts.max_instrumented_allocators) catch unreachable;
+        context.instrumented_allocators.ensureTotalCapacityPrecise(opts.max_instrumented_allocators) catch unreachable;
         context.message_queue_lock = std.Thread.Mutex{};
         context.message_queue = std.ArrayList(u8).init(allocator);
-        context.message_queue.ensureTotalCapacity(buffer.len - fba.end_index) catch unreachable;
+        context.message_queue.ensureTotalCapacityPrecise(buffer.len - fba.end_index) catch unreachable;
         context.socket_server = network.Socket.create(.ipv4, .tcp) catch |err| {
             std.log.err("[Memview] Failed to create an IPV4 TCP socket: {}\n", .{err});
             return err;
         };
-        context.socket_server.bindToPort(9000) catch |err| {
+        context.socket_server.enablePortReuse(true) catch |err| {
+            std.log.err("[Memview] Failed to enable port reuse on server socket: {}. Continuing...\n", .{err});
+        };
+        context.socket_server.bindToPort(8080) catch |err| {
             std.log.err("[Memview] Failed to bind socket to port 9000: {}\n", .{err});
             return err;
         };
@@ -174,7 +177,10 @@ pub const HostContext = struct {
             _ = client.send(self.message_queue.items) catch |err| {
                 std.log.err("[Memview] Caught {} sending queue items. Client disconnected.", .{err});
                 self.socket_client = null;
+                self.message_queue.clearRetainingCapacity();
+                return;
             };
+            // std.debug.print("num sent bytes: {}\n", .{sent_bytes});
         }
         self.message_queue.clearRetainingCapacity();
     }
@@ -266,6 +272,7 @@ pub const HostContext = struct {
             std.log.warn("[Memview] Not enough capacity in message queue, peforming blocking flush to avoid dropping message. Allocate more memory to memview or call pumpMsgQueue() more often to avoid this.", .{});
             self.pumpMsgQueueUnlocked();
         }
+        // std.debug.print("sending msg: {}\n", .{msg});
         msg.write(&self.message_queue);
         self.message_queue_lock.unlock();
     }
