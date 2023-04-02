@@ -33,24 +33,72 @@ const GfxState = struct {
 };
 
 const GuiState = struct {
-    cursor_timestamp: u64 = 0,
-
-    timeline_zoom: f32 = 1.0,
-    timeline_zoom_target: f32 = 1.0,
-
     mouse_pos_x: f64 = 0.0,
     mouse_pos_y: f64 = 0.0,
     mouse_delta_x: f64 = 0.0,
     mouse_delta_y: f64 = 0.0,
     scroll_delta_x: f64 = 0.0,
     scroll_delta_y: f64 = 0.0,
+    is_dragging_viewport: bool = false,
+    is_dragging_cursor: bool = false,
 
+    timeline_zoom: f32 = 1.0,
+    timeline_zoom_target: f32 = 1.0,
+
+    mem_zoom: f32 = 1.0,
+    mem_zoom_target: f32 = 1.0,
+
+    cursor_timestamp: u64 = 0,
     viewport_timestamp: u64 = 0,
+
+    cursors: struct {
+        arrow: *zglfw.Cursor = undefined,
+        hand: *zglfw.Cursor = undefined,
+    },
+
+    fn tweenZoom(zoom: f32, zoom_target: f32) f32 {
+        var zoom_diff: f32 = zoom_target - zoom;
+        if (zm.abs(zoom_diff) < 0.01) {
+            return zoom_target;
+        } else {
+            return zoom + (0.5 * zoom_diff);
+        }
+    }
 };
 
 const MemoryStats = struct {
+    const MemBlock = struct {
+        address: usize,
+        size: usize,
+
+        fn lessThan(_: void, lhs: MemBlock, rhs: MemBlock) bool {
+            return lhs.address < rhs.address;
+        }
+    };
+
+    const Cache = struct {
+        blocks: std.ArrayList(MemBlock),
+    };
+
     first_timestamp: u64 = std.math.maxInt(u64),
     last_timestamp: u64 = 0,
+
+    all_messages: std.ArrayList(common.Message),
+    new_messages: std.ArrayList(common.Message),
+
+    cache: Cache,
+
+    fn init(allocator: std.mem.Allocator) MemoryStats {
+        return MemoryStats{ .all_messages = std.ArrayList(common.Message).init(allocator), .new_messages = std.ArrayList(common.Message).init(allocator), .cache = Cache{
+            .blocks = std.ArrayList(MemBlock).init(allocator),
+        } };
+    }
+
+    fn deinit(self: *MemoryStats) void {
+        self.all_messages.deinit();
+        self.new_messages.deinit();
+        self.cache.blocks.deinit();
+    }
 
     fn timespanUs(self: *MemoryStats) u64 {
         if (self.first_timestamp < self.last_timestamp) {
@@ -67,6 +115,40 @@ const MemoryStats = struct {
         }
         return 0;
     }
+
+    fn updateCache(self: *MemoryStats, timestamp: u64) !void {
+        self.cache.blocks.clearRetainingCapacity();
+
+        for (self.all_messages.items) |msg| {
+            switch (msg) {
+                .Alloc => |v| {
+                    if (v.timestamp > timestamp) {
+                        break;
+                    }
+
+                    try self.cache.blocks.append(MemBlock{
+                        .address = v.address,
+                        .size = v.size,
+                    });
+                },
+                .Free => |v| {
+                    if (v.timestamp > timestamp) {
+                        break;
+                    }
+
+                    for (self.cache.blocks.items, 0..) |block, i| {
+                        if (block.address == v.address) {
+                            _ = self.cache.blocks.swapRemove(i);
+                            break;
+                        }
+                    }
+                },
+                else => {},
+            }
+        }
+
+        std.sort.sort(MemBlock, self.cache.blocks.items, {}, MemBlock.lessThan);
+    }
 };
 
 const AppContext = struct {
@@ -74,8 +156,7 @@ const AppContext = struct {
     window: *zglfw.Window,
     gfx: GfxState,
     client: ClientContext,
-    all_messages: std.ArrayList(common.Message),
-    new_messages: std.ArrayList(common.Message),
+
     mem_stats: MemoryStats,
     gui: GuiState,
 
@@ -84,10 +165,11 @@ const AppContext = struct {
         app.gfx = try GfxState.init(window, allocator);
         app.window = window;
         app.client = try ClientContext.init(allocator);
-        app.all_messages = std.ArrayList(common.Message).init(allocator);
-        app.new_messages = std.ArrayList(common.Message).init(allocator);
-        app.mem_stats = MemoryStats{};
-        app.gui = GuiState{};
+        app.mem_stats = MemoryStats.init(allocator);
+        app.gui = GuiState{ .cursors = .{} };
+
+        app.gui.cursors.arrow = try zglfw.Cursor.createStandard(.arrow);
+        app.gui.cursors.hand = try zglfw.Cursor.createStandard(.hand);
 
         zgui.init(allocator);
         zgui.backend.initWithConfig(
@@ -113,14 +195,13 @@ const AppContext = struct {
         zgui.backend.deinit();
         zgui.deinit();
         self.client.deinit();
-        self.all_messages.deinit();
-        self.new_messages.deinit();
+        self.mem_stats.deinit();
     }
 };
 
 fn updateMessages(app: *AppContext) !void {
-    try client.fetchMessages(&app.client, &app.new_messages);
-    for (app.new_messages.items) |msg| {
+    try client.fetchMessages(&app.client, &app.mem_stats.new_messages);
+    for (app.mem_stats.new_messages.items) |msg| {
         const timestamp = switch (msg) {
             .Frame => |v| v.timestamp,
             .Alloc => |v| v.timestamp,
@@ -141,11 +222,20 @@ fn updateMessages(app: *AppContext) !void {
     //     // }
     // }
     // temp for debugging
-    try app.all_messages.appendSlice(app.new_messages.items);
-    app.new_messages.clearRetainingCapacity();
+    try app.mem_stats.all_messages.appendSlice(app.mem_stats.new_messages.items);
+    app.mem_stats.new_messages.clearRetainingCapacity();
 }
 
-fn updateGui(app: *AppContext) void {
+fn updateGui(app: *AppContext) !void {
+    const Helpers = struct {
+        fn usToS(timestamp: u64) f64 {
+            return @intToFloat(f64, timestamp) / @intToFloat(f64, std.time.us_per_s);
+        }
+        fn sToUs(timestamp: f64) u64 {
+            return @floatToInt(u64, timestamp * @intToFloat(f64, std.time.us_per_s));
+        }
+    };
+
     var gctx: *zgpu.GraphicsContext = app.gfx.gctx;
 
     const backbuffer_width = @intToFloat(f32, gctx.swapchain_descriptor.width);
@@ -200,11 +290,11 @@ fn updateGui(app: *AppContext) void {
     defer draw_list.popClipRect();
 
     const gui: *GuiState = &app.gui;
+    var next_cursor: *zglfw.Cursor = gui.cursors.arrow;
 
-    // global timeline
     {
         const timeline_width = backbuffer_width;
-        const timeline_height = 30.0;
+        const timeline_height = 22.0;
         const timeline_y_min = next_window_y;
         const timeline_y_max = next_window_y + timeline_height;
 
@@ -217,28 +307,28 @@ fn updateGui(app: *AppContext) void {
             },
         );
 
-        const timeline_duration = app.mem_stats.timespanSecs();
+        // timeline top and bottom border
+        draw_list.addLine(.{
+            .p1 = .{ 0, timeline_y_min },
+            .p2 = .{ timeline_width, timeline_y_min },
+            .col = 0xFF707070,
+            .thickness = 1,
+        });
+
+        draw_list.addLine(.{
+            .p1 = .{ 0, timeline_y_max },
+            .p2 = .{ timeline_width, timeline_y_max },
+            .col = 0xFF707070,
+            .thickness = 1,
+        });
+
+        const timeline_duration: f64 = app.mem_stats.timespanSecs();
         if (timeline_duration > 0.0) {
             // const timeline_duration_us = @intToFloat(f64, app.mem_stats.timespanUs());
 
-            // timeline top and bottom border
-            draw_list.addLine(.{
-                .p1 = .{0, timeline_y_min},
-                .p2 = .{timeline_width, timeline_y_min},
-                .col = 0xFF707070,
-                .thickness = 1,
-                });
-
-            draw_list.addLine(.{
-                .p1 = .{0, timeline_y_max},
-                .p2 = .{timeline_width, timeline_y_max},
-                .col = 0xFF707070,
-                .thickness = 1,
-                });
-
             // timeline ticks and labels
             const num_timeline_ticks: usize = 10;
-            for (0..num_timeline_ticks+1) |i| {
+            for (0..num_timeline_ticks + 1) |i| {
                 const ratio = @intToFloat(f32, i) / @intToFloat(f32, num_timeline_ticks);
                 var x_offset: f32 = 0;
                 if (i == num_timeline_ticks) {
@@ -246,7 +336,7 @@ fn updateGui(app: *AppContext) void {
                 }
                 const tick_x = ratio * timeline_width - x_offset;
                 const secs = ratio * timeline_duration;
-                draw_list.addLine(.{.p1 = .{tick_x, timeline_y_min}, .p2 = .{tick_x, timeline_y_max}, .col = 0xFF707070, .thickness = 1});
+                draw_list.addLine(.{ .p1 = .{ tick_x, timeline_y_min }, .p2 = .{ tick_x, timeline_y_max }, .col = 0xFF707070, .thickness = 1 });
 
                 var text_buffer: [32]u8 = undefined;
                 const text = std.fmt.bufPrint(&text_buffer, "{d:.2}ms", .{secs * 1000.0}) catch unreachable;
@@ -260,19 +350,21 @@ fn updateGui(app: *AppContext) void {
                         text_x -= text_size[0] / 2.0;
                     }
                 }
-                
-                draw_list.addTextUnformatted(.{text_x, timeline_y_min + 4}, 0xFFD0D0D0, text);
+
+                draw_list.addTextUnformatted(.{ text_x, timeline_y_min + 4 }, 0xFFD0D0D0, text);
             }
 
-                const timeline_timestamp_begin_s = @intToFloat(f64, app.mem_stats.first_timestamp) / @intToFloat(f64, std.time.us_per_s);
-                const timeline_timestamp_end_s = @intToFloat(f64, app.mem_stats.last_timestamp) / @intToFloat(f64, std.time.us_per_s);
+            const timeline_timestamp_begin_s = Helpers.usToS(app.mem_stats.first_timestamp);
+            const timeline_timestamp_end_s = Helpers.usToS(app.mem_stats.last_timestamp);
 
             // viewport
-            if (gui.mouse_pos_y >= timeline_y_min and gui.mouse_pos_y <= timeline_y_max) {
-                const viewport_duration: f64 = timeline_duration / gui.timeline_zoom;
+            gui.is_dragging_viewport = false;
+
+            const viewport_duration: f64 = timeline_duration / gui.timeline_zoom;
+            if (gui.mouse_pos_y >= timeline_y_min and gui.mouse_pos_y <= timeline_y_max and gui.is_dragging_cursor == false) {
                 // const viewport_duration_us: u64 = @floatToInt(u64, viewport_duration * @intToFloat(f64, std.time.us_per_s));
                 // const viewport_width: f64 = (viewport_duration / timeline_duration) * timeline_width;
-                const viewport_timestamp_begin_s = @intToFloat(f64, gui.viewport_timestamp) / @intToFloat(f64, std.time.us_per_s);
+                const viewport_timestamp_begin_s = Helpers.usToS(gui.viewport_timestamp);
                 // const viewport_x_min = ((timeline_timestamp_end_s - viewport_timestamp_begin_s) / timeline_duration) * timeline_width;
                 // const viewport_x_max = viewport_x_min + (viewport_duration / timeline_duration) * timeline_width;
 
@@ -288,59 +380,183 @@ fn updateGui(app: *AppContext) void {
                     // }
 
                     // zoom into the moused-over location
-                    // gui.target_zoom += gui.scroll_delta_y * 
+                    // gui.target_zoom += gui.scroll_delta_y *
                     app.gui.timeline_zoom_target = std.math.max(app.gui.timeline_zoom_target + @floatCast(f32, gui.scroll_delta_y * 0.25), 1.0);
                 }
 
                 if (app.window.getMouseButton(.left) == .press) {
+                    gui.is_dragging_viewport = true;
                     const viewport_timestamp_delta: f64 = viewport_duration * gui.mouse_delta_x * 0.01;
                     const viewport_timestamp_begin_shifted_s = std.math.clamp(viewport_timestamp_begin_s + viewport_timestamp_delta, timeline_timestamp_begin_s, timeline_timestamp_end_s - viewport_duration);
-                    const viewport_timestamp_begin = @floatToInt(u64, viewport_timestamp_begin_shifted_s * @intToFloat(f64, std.time.us_per_s));
-                    gui.viewport_timestamp = viewport_timestamp_begin;// std.math.clamp(viewport_timestamp_unclamped, app.mem_stats.first_timestamp, app.mem_stats.last_timestamp - viewport_duration_us);
+                    const viewport_timestamp_begin = Helpers.sToUs(viewport_timestamp_begin_shifted_s);
+                    gui.viewport_timestamp = viewport_timestamp_begin; // std.math.clamp(viewport_timestamp_unclamped, app.mem_stats.first_timestamp, app.mem_stats.last_timestamp - viewport_duration_us);
+
+                    next_cursor = gui.cursors.hand;
+                } else if (app.window.getMouseButton(.right) == .press) {
+                    // TODO right click and drag to redefine the viewport
                 }
             }
 
-            var zoom_diff = app.gui.timeline_zoom_target - app.gui.timeline_zoom;
-            if (zm.abs(zoom_diff) < 0.01) {
-                app.gui.timeline_zoom = app.gui.timeline_zoom_target;
-            } else {
-                app.gui.timeline_zoom += 0.5 * zoom_diff;
+            app.gui.timeline_zoom = GuiState.tweenZoom(app.gui.timeline_zoom, app.gui.timeline_zoom_target);
+
+            // const viewport_duration: f64 = timeline_duration / gui.timeline_zoom;
+            const viewport_duration_us: u64 = Helpers.sToUs(viewport_duration);
+            const viewport_timestamp_clamped = std.math.clamp(gui.viewport_timestamp, app.mem_stats.first_timestamp, app.mem_stats.last_timestamp - viewport_duration_us);
+            const viewport_timestamp_begin_s = Helpers.usToS(viewport_timestamp_clamped);
+            const viewport_timestamp_end_s = Helpers.usToS(viewport_timestamp_clamped) + viewport_duration;
+
+            // draw viewport in the global timeline
+            {
+                const viewport_x: f32 = @floatCast(f32, 1.0 - ((timeline_timestamp_end_s - viewport_timestamp_begin_s) / timeline_duration)) * timeline_width;
+                const viewport_width: f64 = (viewport_duration / timeline_duration) * timeline_width;
+
+                draw_list.addRect(
+                    .{
+                        .pmin = .{ @floatCast(f32, viewport_x), timeline_y_min },
+                        .pmax = .{ @floatCast(f32, viewport_x + viewport_width), timeline_y_max },
+                        .col = 0xFFFCFF4F,
+                    },
+                );
             }
 
-            // const timeline_timestamp_begin = @intToFloat(f64, app.mem_stats.first_timestamp);
+            const cursor_timestamp_clamped_us: u64 = std.math.clamp(gui.cursor_timestamp, app.mem_stats.first_timestamp, app.mem_stats.last_timestamp);
+            var cursor_timestamp_s: f64 = Helpers.usToS(cursor_timestamp_clamped_us);
 
-            const viewport_timestamp_clamped = std.math.clamp(gui.viewport_timestamp, app.mem_stats.first_timestamp, app.mem_stats.last_timestamp);
-            const viewport_timestamp_begin_s = @intToFloat(f64, viewport_timestamp_clamped) / @intToFloat(f64, std.time.us_per_s);
-            const viewport_x: f32 = @floatCast(f32, 1.0 - ((timeline_timestamp_end_s - viewport_timestamp_begin_s) / timeline_duration)) * timeline_width;
+            // viewport timeline and cursor
+            const viewport_timeline_height = 40.0;
+            const viewport_timeline_y_min = timeline_y_max + 1;
+            const viewport_timeline_y_max = viewport_timeline_y_min + viewport_timeline_height;
 
-            const viewport_duration: f64 = timeline_duration / gui.timeline_zoom;
-            const viewport_width: f64 = (viewport_duration / timeline_duration) * timeline_width;            
+            {
+                draw_list.addRectFilled(
+                    .{
+                        .pmin = .{ 0, viewport_timeline_y_min },
+                        .pmax = .{ timeline_width, viewport_timeline_y_max },
+                        .col = zgui.colorConvertFloat3ToU32([_]f32{ 0.08, 0.08, 0.08 }),
+                        .rounding = 0,
+                    },
+                );
 
-            draw_list.addRect(
-                .{
-                    .pmin = .{ @floatCast(f32, viewport_x), timeline_y_min },
-                    .pmax = .{ @floatCast(f32, viewport_x + viewport_width), timeline_y_max },
-                    .col = 0xFFFCFF4F,
-                },
-            );
+                draw_list.addLine(.{
+                    .p1 = .{ 0, viewport_timeline_y_max },
+                    .p2 = .{ timeline_width, viewport_timeline_y_max },
+                    .col = 0xFF707070,
+                    .thickness = 1,
+                });
+
+                {
+                    var cursor_x: f32 = @floatCast(f32, 1.0 - ((viewport_timestamp_end_s - cursor_timestamp_s) / viewport_duration)) * timeline_width;
+
+                    const is_mouse_in_viewport_timeline = gui.mouse_pos_y >= viewport_timeline_y_min and
+                        gui.mouse_pos_y <= viewport_timeline_y_max and
+                        gui.mouse_pos_x >= (cursor_x - 5.0) and
+                        gui.mouse_pos_x <= (cursor_x + 5.0);
+                    const can_drag_cursor: bool = (is_mouse_in_viewport_timeline or gui.is_dragging_cursor) and gui.is_dragging_viewport == false;
+                    if (can_drag_cursor and app.window.getMouseButton(.left) == .press) {
+                        gui.is_dragging_cursor = true;
+                        next_cursor = gui.cursors.hand;
+
+                        cursor_timestamp_s = viewport_timestamp_begin_s + (gui.mouse_pos_x / timeline_width) * viewport_duration;
+                    } else {
+                        gui.is_dragging_cursor = false;
+                    }
+
+                    // clamp the cursor position to the viewport. ensures if the viewport is moved or the cursor is dragged outside that it stays within bounds
+                    cursor_timestamp_s = std.math.clamp(cursor_timestamp_s, viewport_timestamp_begin_s, viewport_timestamp_end_s);
+                    gui.cursor_timestamp = Helpers.sToUs(cursor_timestamp_s);
+                    cursor_x = @floatCast(f32, 1.0 - ((viewport_timestamp_end_s - cursor_timestamp_s) / viewport_duration)) * timeline_width;
+
+                    try app.mem_stats.updateCache(gui.cursor_timestamp);
+
+                    // draw the cursor on the viewport timeline
+                    draw_list.addLine(.{
+                        .p1 = .{ cursor_x, viewport_timeline_y_min },
+                        .p2 = .{ cursor_x, viewport_timeline_y_max },
+                        .col = 0xFF0000FF, // ABGR
+                        .thickness = 1,
+                    });
+
+                    // draw the cursor on the global timeline
+                    const cursor_x_timeline = @floatCast(f32, 1.0 - ((timeline_timestamp_end_s - cursor_timestamp_s) / timeline_duration)) * timeline_width;
+                    draw_list.addLine(.{
+                        .p1 = .{ cursor_x_timeline, timeline_y_min },
+                        .p2 = .{ cursor_x_timeline, timeline_y_max },
+                        .col = 0xFF0000FF, // ABGR
+                        .thickness = 1,
+                    });
+
+                    // draw the timestamp on the text
+                    var text_buffer: [32]u8 = undefined;
+                    const text = std.fmt.bufPrint(&text_buffer, "{d:.2}ms", .{(cursor_timestamp_s - viewport_timestamp_begin_s) * 1000.0}) catch unreachable;
+                    const text_size: [2]f32 = zgui.calcTextSize(text, .{});
+                    const text_x = if (cursor_x + 4 + text_size[0] <= timeline_width) (cursor_x + 4) else (cursor_x - 2 - text_size[0]);
+                    draw_list.addTextUnformatted(.{ text_x, viewport_timeline_y_max - 4 - text_size[1] }, 0xFF0000FF, text);
+                }
+            }
+
+            // draw first, last, and cursor timestamps
+
+            // draw alloc events in buckets? or maybe this is just a frame/bookmark view with the cursor?
+
+            // const timeline_width = backbuffer_width;
+            // const timeline_height = 30.0;
+            // const timeline_y_min = next_window_y;
+            // const timeline_y_max = next_window_y + timeline_height;
+            // }
+
+            // zoomable view of memory state at cursor
+            {
+                const mem_viewport_y_min = viewport_timeline_y_max + 1;
+                const mem_viewport_y_max = backbuffer_height;
+
+                if (gui.mouse_pos_y >= mem_viewport_y_min and gui.mouse_pos_y <= mem_viewport_y_max) {
+                    if (gui.scroll_delta_y != 0) {
+                        app.gui.mem_zoom_target = std.math.max(app.gui.mem_zoom_target + @floatCast(f32, gui.scroll_delta_y * 0.25), 1.0);
+                    }
+                }
+
+                gui.mem_zoom = GuiState.tweenZoom(gui.mem_zoom, gui.mem_zoom_target);
+
+                // TODO render a little horizontal bar that shows the current zoom state relative to the address space.
+                // maybe the background color is just a thicker version of the border and the "current" zoom is purple bar that slides across it
+
+                const cache: *const MemoryStats.Cache = &app.mem_stats.cache;
+
+                if (cache.blocks.items.len > 0) {
+                    const first_block = &cache.blocks.items[0];
+                    const last_block = &cache.blocks.items[cache.blocks.items.len - 1];
+
+                    const kb = 1024;
+
+                    const first_address = first_block.address - (first_block.address % kb);
+                    const last_address = last_block.address + (last_block.address % kb);
+                    const address_space = @intToFloat(f64, last_address - first_address);
+
+                    for (cache.blocks.items) |block| {
+                        const block_start_address = block.address;
+                        const block_end_address = block.address + block.size;
+
+                        const start_address_offset = block_start_address - first_address;
+                        const end_address_offset = block_end_address - first_address;
+
+                        const block_x_start = @intToFloat(f64, start_address_offset) / address_space;
+                        const block_x_end = @intToFloat(f64, end_address_offset) / address_space;
+
+                        draw_list.addRectFilled(
+                            .{
+                                .pmin = .{ @floatCast(f32, block_x_start), mem_viewport_y_min },
+                                .pmax = .{ @floatCast(f32, block_x_end), mem_viewport_y_max },
+                                .col = 0xFF00FF00,
+                                .rounding = 0,
+                            },
+                        );
+                    }
+                }
+            }
         }
-
-        // draw_list.addText(.{ 130, next_window_y + 20 }, 0xff_00_00_ff, "heyooooo {}", .{7});
-
     }
 
-    // local timeline and cursor
-    {
-        // const timeline_width = backbuffer_width;
-        // const timeline_height = 30.0;
-        // const timeline_y_min = next_window_y;
-        // const timeline_y_max = next_window_y + timeline_height;
-    }
-
-    // zoomable view of memory state at cursor
-    {
-        //
-    }
+    app.window.setCursor(next_cursor);
 
     app.gui.mouse_delta_x = 0;
     app.gui.mouse_delta_y = 0;
@@ -435,7 +651,7 @@ pub fn main() !void {
         );
 
         try updateMessages(app);
-        updateGui(app);
+        try updateGui(app);
         draw(app);
     }
 
