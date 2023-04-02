@@ -108,7 +108,7 @@ pub const Message = union(MessageType) {
 
         while (true) {
             const msg_type_raw = reader.readByte() catch break;
-            std.debug.print("found raw msg type {} at offset {}\n", .{ msg_type_raw, fbs.pos - 1 });
+            // std.debug.print("found raw msg type {} at offset {}\n", .{ msg_type_raw, fbs.pos - 1 });
             const msg_type = @intToEnum(MessageType, msg_type_raw);
             const msg_size = reader.readIntLittle(u16) catch break;
             if (buffer.len - fbs.pos < msg_size) {

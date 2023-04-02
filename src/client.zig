@@ -51,6 +51,7 @@ pub fn joinThread(context: *ClientContext) void {
 pub fn fetchMessages(context: *ClientContext, fetched: *std.ArrayList(Message)) !void {
     context.shared_message_buffer_lock.lock();
     try fetched.appendSlice(context.shared_message_buffer.items);
+    context.shared_message_buffer.clearRetainingCapacity();
     context.shared_message_buffer_lock.unlock();
 }
 
@@ -76,8 +77,6 @@ fn mainClientThread(context: *ClientContext, client: *network.Socket) !void {
             std.debug.print("Client disconnected. Exiting thread...\n", .{});
             break;
         }
-
-        std.debug.print("got {} bytes...\n", .{received_bytes});
 
         context.shared_message_buffer_lock.lock();
         const concatenated_receive_slice = context.receive_buffer[0 .. begin_offset + received_bytes];
