@@ -77,6 +77,10 @@ const MemoryStats = struct {
     };
 
     const Cache = struct {
+        timestamp: u64 = 0,
+        lowest_address: u64 = 0,
+        highest_address: u64 = 0,
+        selected_block: ?*const MemBlock = null,
         blocks: std.ArrayList(MemBlock),
     };
 
@@ -117,29 +121,40 @@ const MemoryStats = struct {
     }
 
     fn updateCache(self: *MemoryStats, timestamp: u64) !void {
+        if (self.cache.timestamp == timestamp) {
+            return;
+        }
+
+        self.cache.timestamp = timestamp;
+
+        const num_old = self.cache.blocks.items.len;
+
         self.cache.blocks.clearRetainingCapacity();
+        self.cache.selected_block = null;
+
+        self.cache.lowest_address = std.math.maxInt(u64);
+        self.cache.highest_address = 0;
 
         for (self.all_messages.items) |msg| {
             switch (msg) {
                 .Alloc => |v| {
-                    if (v.timestamp > timestamp) {
-                        break;
+                    if (v.timestamp <= timestamp) {
+                        try self.cache.blocks.append(MemBlock{
+                            .address = v.address,
+                            .size = v.size,
+                        });
                     }
 
-                    try self.cache.blocks.append(MemBlock{
-                        .address = v.address,
-                        .size = v.size,
-                    });
+                    self.cache.lowest_address = std.math.min(self.cache.lowest_address, v.address);
+                    self.cache.highest_address = std.math.max(self.cache.lowest_address, v.address);
                 },
                 .Free => |v| {
-                    if (v.timestamp > timestamp) {
-                        break;
-                    }
-
-                    for (self.cache.blocks.items, 0..) |block, i| {
-                        if (block.address == v.address) {
-                            _ = self.cache.blocks.swapRemove(i);
-                            break;
+                    if (v.timestamp <= timestamp) {
+                        for (self.cache.blocks.items, 0..) |block, i| {
+                            if (block.address == v.address) {
+                                _ = self.cache.blocks.swapRemove(i);
+                                break;
+                            }
                         }
                     }
                 },
@@ -148,6 +163,8 @@ const MemoryStats = struct {
         }
 
         std.sort.sort(MemBlock, self.cache.blocks.items, {}, MemBlock.lessThan);
+
+        std.debug.print("cache blocks: {} -> {}\n", .{ num_old, self.cache.blocks.items.len });
     }
 };
 
@@ -273,6 +290,9 @@ fn updateGui(app: *AppContext) !void {
     };
 
     if (zgui.begin("call_tree", .{ .flags = call_tree_flags })) {
+        if (app.mem_stats.cache.selected_block) |block| {
+            zgui.text("selected_block at 0x{X} with size {} bytes", .{ block.address, block.size });
+        }
         zgui.textUnformatted("Call tree goes here");
         if (zgui.treeNodeStrId("tree_id1", "My Tree {d}", .{1})) {
             if (zgui.treeNodeStrId("tree_id2", "My Tree {d}", .{2})) {
@@ -487,7 +507,7 @@ fn updateGui(app: *AppContext) !void {
 
                     // draw the timestamp on the text
                     var text_buffer: [32]u8 = undefined;
-                    const text = std.fmt.bufPrint(&text_buffer, "{d:.2}ms", .{(cursor_timestamp_s - viewport_timestamp_begin_s) * 1000.0}) catch unreachable;
+                    const text = std.fmt.bufPrint(&text_buffer, "{d:.2}ms", .{(cursor_timestamp_s - timeline_timestamp_begin_s) * 1000.0}) catch unreachable;
                     const text_size: [2]f32 = zgui.calcTextSize(text, .{});
                     const text_x = if (cursor_x + 4 + text_size[0] <= timeline_width) (cursor_x + 4) else (cursor_x - 2 - text_size[0]);
                     draw_list.addTextUnformatted(.{ text_x, viewport_timeline_y_max - 4 - text_size[1] }, 0xFF0000FF, text);
@@ -509,47 +529,107 @@ fn updateGui(app: *AppContext) !void {
                 const mem_viewport_y_min = viewport_timeline_y_max + 1;
                 const mem_viewport_y_max = backbuffer_height;
 
-                if (gui.mouse_pos_y >= mem_viewport_y_min and gui.mouse_pos_y <= mem_viewport_y_max) {
-                    if (gui.scroll_delta_y != 0) {
-                        app.gui.mem_zoom_target = std.math.max(app.gui.mem_zoom_target + @floatCast(f32, gui.scroll_delta_y * 0.25), 1.0);
-                    }
+                const mem_viewport_zoom_bar_y_min = mem_viewport_y_min;
+                const mem_viewport_zoom_bar_y_max = mem_viewport_zoom_bar_y_min + 6;
+
+                const is_mouse_in_mem_viewport = gui.mouse_pos_y >= mem_viewport_y_min and gui.mouse_pos_y <= mem_viewport_y_max;
+                if (is_mouse_in_mem_viewport and gui.scroll_delta_y != 0) {
+                    app.gui.mem_zoom_target = std.math.max(app.gui.mem_zoom_target + @floatCast(f32, gui.scroll_delta_y * 0.25), 1.0);
+                }
+
+                if (is_mouse_in_mem_viewport and app.window.getMouseButton(.left) == .press) {
+                    app.mem_stats.cache.selected_block = null;
                 }
 
                 gui.mem_zoom = GuiState.tweenZoom(gui.mem_zoom, gui.mem_zoom_target);
 
-                // TODO render a little horizontal bar that shows the current zoom state relative to the address space.
-                // maybe the background color is just a thicker version of the border and the "current" zoom is purple bar that slides across it
+                // render memory view zoom
+                {
+                    draw_list.addRectFilled(.{
+                        .pmin = .{ 0, mem_viewport_zoom_bar_y_min },
+                        .pmax = .{ backbuffer_width, mem_viewport_zoom_bar_y_max },
+                        .col = 0xFF707070,
+                    });
 
-                const cache: *const MemoryStats.Cache = &app.mem_stats.cache;
+                    const mem_zoom_bar_x_min = 0;
+                    const mem_zoom_bar_x_max = backbuffer_width / @floatCast(f32, gui.mem_zoom);
+
+                    draw_list.addRectFilled(.{
+                        .pmin = .{ mem_zoom_bar_x_min, mem_viewport_zoom_bar_y_min + 1 },
+                        .pmax = .{ mem_zoom_bar_x_max, mem_viewport_zoom_bar_y_max },
+                        .col = 0xFFFF1CAB,
+                    });
+                }
+
+                const mem_viewport_address_ticks_y_min = mem_viewport_zoom_bar_y_max;
+                const mem_viewport_address_ticks_y_max = mem_viewport_address_ticks_y_min + 16;
+
+                const mem_viewport_blocks_y_min = mem_viewport_address_ticks_y_max + 1;
+                const mem_viewport_blocks_y_max = backbuffer_height;
+
+                const cache: *MemoryStats.Cache = &app.mem_stats.cache;
 
                 if (cache.blocks.items.len > 0) {
-                    const first_block = &cache.blocks.items[0];
-                    const last_block = &cache.blocks.items[cache.blocks.items.len - 1];
-
                     const kb = 1024;
+                    const kb64 = kb * 64;
 
-                    const first_address = first_block.address - (first_block.address % kb);
-                    const last_address = last_block.address + (last_block.address % kb);
+                    const first_address = cache.lowest_address - (cache.lowest_address % kb64);
+                    const last_address = cache.highest_address + (cache.highest_address % kb64);
                     const address_space = @intToFloat(f64, last_address - first_address);
 
-                    for (cache.blocks.items) |block| {
+                    // draw address space labels and ticks
+                    {
+                        const num_64k_pages = @floatToInt(u64, @ceil(address_space / kb64));
+
+                        draw_list.addLine(.{
+                            .p1 = .{ 0, mem_viewport_address_ticks_y_max },
+                            .p2 = .{ timeline_width, mem_viewport_address_ticks_y_max },
+                            .col = 0xFF707070,
+                            .thickness = 1,
+                        });
+
+                        for (0..num_64k_pages) |i| {
+                            const tick_x = (@intToFloat(f32, i) / @intToFloat(f32, num_64k_pages)) * timeline_width;
+                            draw_list.addLine(.{
+                                .p1 = .{ tick_x, mem_viewport_address_ticks_y_min },
+                                .p2 = .{ tick_x, mem_viewport_address_ticks_y_max },
+                                .col = 0xFF707070,
+                                .thickness = 1,
+                            });
+                        }
+                    }
+
+                    for (cache.blocks.items) |*block| {
                         const block_start_address = block.address;
                         const block_end_address = block.address + block.size;
 
                         const start_address_offset = block_start_address - first_address;
                         const end_address_offset = block_end_address - first_address;
 
-                        const block_x_start = @intToFloat(f64, start_address_offset) / address_space;
-                        const block_x_end = @intToFloat(f64, end_address_offset) / address_space;
+                        const block_x_start = (@intToFloat(f64, start_address_offset) / address_space) * timeline_width;
+                        const block_x_end = (@intToFloat(f64, end_address_offset) / address_space) * timeline_width;
+
+                        if (is_mouse_in_mem_viewport and app.window.getMouseButton(.left) == .press and gui.mouse_pos_x >= block_x_start and gui.mouse_pos_x <= block_x_end) {
+                            cache.selected_block = block;
+                        }
 
                         draw_list.addRectFilled(
                             .{
-                                .pmin = .{ @floatCast(f32, block_x_start), mem_viewport_y_min },
-                                .pmax = .{ @floatCast(f32, block_x_end), mem_viewport_y_max },
-                                .col = 0xFF00FF00,
-                                .rounding = 0,
+                                .pmin = .{ @floatCast(f32, block_x_start), mem_viewport_blocks_y_min },
+                                .pmax = .{ @floatCast(f32, block_x_end), mem_viewport_blocks_y_max },
+                                .col = 0xFF56B759,
                             },
                         );
+
+                        if (cache.selected_block == block) {
+                            draw_list.addRect(
+                                .{
+                                    .pmin = .{ @floatCast(f32, block_x_start), mem_viewport_blocks_y_min },
+                                    .pmax = .{ @floatCast(f32, block_x_end), mem_viewport_blocks_y_max },
+                                    .col = 0xFFFFFFFF,
+                                },
+                            );
+                        }
                     }
                 }
             }
