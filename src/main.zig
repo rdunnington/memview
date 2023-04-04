@@ -313,6 +313,17 @@ fn updateGui(app: *AppContext) !void {
     var next_cursor: *zglfw.Cursor = gui.cursors.arrow;
 
     {
+        const COLOR_SECTION_BORDER = 0xFF707070;
+
+        const COLOR_CURSOR_DEFAULT = 0xFF0000A0;
+        const COLOR_CURSOR_HOVER = 0xFF0000FF;
+        const COLOR_CURSOR_DRAGGED = 0xFF0000FF;
+
+        const COLOR_TIMELINE_VIEWPORT_DEFAULT = 0xFFFCFF4F;
+        const COLOR_TIMELINE_VIEWPORT_HOVER = 0xFFFCFF4F;
+        const COLOR_TIMELINE_VIEWPORT_DRAGGED = 0xFFFCFF4F;
+        const COLOR_TIMELINE_TEXT = 0xFFD0D0D0;
+
         const timeline_width = backbuffer_width;
         const timeline_height = 22.0;
         const timeline_y_min = next_window_y;
@@ -331,14 +342,14 @@ fn updateGui(app: *AppContext) !void {
         draw_list.addLine(.{
             .p1 = .{ 0, timeline_y_min },
             .p2 = .{ timeline_width, timeline_y_min },
-            .col = 0xFF707070,
+            .col = COLOR_SECTION_BORDER,
             .thickness = 1,
         });
 
         draw_list.addLine(.{
             .p1 = .{ 0, timeline_y_max },
             .p2 = .{ timeline_width, timeline_y_max },
-            .col = 0xFF707070,
+            .col = COLOR_SECTION_BORDER,
             .thickness = 1,
         });
 
@@ -356,7 +367,7 @@ fn updateGui(app: *AppContext) !void {
                 }
                 const tick_x = ratio * timeline_width - x_offset;
                 const secs = ratio * timeline_duration;
-                draw_list.addLine(.{ .p1 = .{ tick_x, timeline_y_min }, .p2 = .{ tick_x, timeline_y_max }, .col = 0xFF707070, .thickness = 1 });
+                draw_list.addLine(.{ .p1 = .{ tick_x, timeline_y_min }, .p2 = .{ tick_x, timeline_y_max }, .col = COLOR_SECTION_BORDER, .thickness = 1 });
 
                 var text_buffer: [32]u8 = undefined;
                 const text = std.fmt.bufPrint(&text_buffer, "{d:.2}ms", .{secs * 1000.0}) catch unreachable;
@@ -381,6 +392,8 @@ fn updateGui(app: *AppContext) !void {
             gui.is_dragging_viewport = false;
 
             const viewport_duration: f64 = timeline_duration / gui.timeline_zoom;
+            var timeline_viewport_color: u32 = COLOR_TIMELINE_VIEWPORT_DEFAULT;
+
             if (gui.mouse_pos_y >= timeline_y_min and gui.mouse_pos_y <= timeline_y_max and gui.is_dragging_cursor == false) {
                 // const viewport_duration_us: u64 = @floatToInt(u64, viewport_duration * @intToFloat(f64, std.time.us_per_s));
                 // const viewport_width: f64 = (viewport_duration / timeline_duration) * timeline_width;
@@ -404,6 +417,8 @@ fn updateGui(app: *AppContext) !void {
                     app.gui.timeline_zoom_target = std.math.max(app.gui.timeline_zoom_target + @floatCast(f32, gui.scroll_delta_y * 0.25), 1.0);
                 }
 
+                timeline_viewport_color = COLOR_TIMELINE_VIEWPORT_HOVER;
+
                 if (app.window.getMouseButton(.left) == .press) {
                     gui.is_dragging_viewport = true;
                     const viewport_timestamp_delta: f64 = viewport_duration * gui.mouse_delta_x * 0.01;
@@ -412,6 +427,7 @@ fn updateGui(app: *AppContext) !void {
                     gui.viewport_timestamp = viewport_timestamp_begin; // std.math.clamp(viewport_timestamp_unclamped, app.mem_stats.first_timestamp, app.mem_stats.last_timestamp - viewport_duration_us);
 
                     next_cursor = gui.cursors.hand;
+                    timeline_viewport_color = COLOR_TIMELINE_VIEWPORT_DRAGGED;
                 } else if (app.window.getMouseButton(.right) == .press) {
                     // TODO right click and drag to redefine the viewport
                 }
@@ -429,12 +445,14 @@ fn updateGui(app: *AppContext) !void {
             {
                 const viewport_x: f32 = @floatCast(f32, 1.0 - ((timeline_timestamp_end_s - viewport_timestamp_begin_s) / timeline_duration)) * timeline_width;
                 const viewport_width: f64 = (viewport_duration / timeline_duration) * timeline_width;
+                const thickness: f32 = if (gui.is_dragging_viewport) 2 else 1;
 
                 draw_list.addRect(
                     .{
                         .pmin = .{ @floatCast(f32, viewport_x), timeline_y_min },
                         .pmax = .{ @floatCast(f32, viewport_x + viewport_width), timeline_y_max },
-                        .col = 0xFFFCFF4F,
+                        .col = timeline_viewport_color,
+                        .thickness = thickness,
                     },
                 );
             }
@@ -460,18 +478,18 @@ fn updateGui(app: *AppContext) !void {
                 draw_list.addLine(.{
                     .p1 = .{ 0, viewport_timeline_y_max },
                     .p2 = .{ timeline_width, viewport_timeline_y_max },
-                    .col = 0xFF707070,
+                    .col = COLOR_SECTION_BORDER,
                     .thickness = 1,
                 });
 
                 {
                     var cursor_x: f32 = @floatCast(f32, 1.0 - ((viewport_timestamp_end_s - cursor_timestamp_s) / viewport_duration)) * timeline_width;
 
-                    const is_mouse_in_viewport_timeline = gui.mouse_pos_y >= viewport_timeline_y_min and
+                    const is_mouse_hovering_cursor = gui.mouse_pos_y >= viewport_timeline_y_min and
                         gui.mouse_pos_y <= viewport_timeline_y_max and
-                        gui.mouse_pos_x >= (cursor_x - 5.0) and
-                        gui.mouse_pos_x <= (cursor_x + 5.0);
-                    const can_drag_cursor: bool = (is_mouse_in_viewport_timeline or gui.is_dragging_cursor) and gui.is_dragging_viewport == false;
+                        gui.mouse_pos_x >= (cursor_x - 15.0) and
+                        gui.mouse_pos_x <= (cursor_x + 15.0);
+                    const can_drag_cursor: bool = (is_mouse_hovering_cursor or gui.is_dragging_cursor) and gui.is_dragging_viewport == false;
                     if (can_drag_cursor and app.window.getMouseButton(.left) == .press) {
                         gui.is_dragging_cursor = true;
                         next_cursor = gui.cursors.hand;
@@ -488,12 +506,25 @@ fn updateGui(app: *AppContext) !void {
 
                     try app.mem_stats.updateCache(gui.cursor_timestamp);
 
+                    const cursor_color: u32 = blk: {
+                        if (gui.is_dragging_cursor) {
+                            break :blk COLOR_CURSOR_DRAGGED;
+                        }
+                        if (can_drag_cursor) {
+                            break :blk COLOR_CURSOR_HOVER;
+                        }
+
+                        break :blk COLOR_CURSOR_DEFAULT;
+                    };
+
+                    const thickness: f32 = if (gui.is_dragging_cursor) 2 else 1;
+
                     // draw the cursor on the viewport timeline
                     draw_list.addLine(.{
                         .p1 = .{ cursor_x, viewport_timeline_y_min },
                         .p2 = .{ cursor_x, viewport_timeline_y_max },
-                        .col = 0xFF0000FF, // ABGR
-                        .thickness = 1,
+                        .col = cursor_color, // ABGR
+                        .thickness = thickness,
                     });
 
                     // draw the cursor on the global timeline
@@ -501,28 +532,37 @@ fn updateGui(app: *AppContext) !void {
                     draw_list.addLine(.{
                         .p1 = .{ cursor_x_timeline, timeline_y_min },
                         .p2 = .{ cursor_x_timeline, timeline_y_max },
-                        .col = 0xFF0000FF, // ABGR
+                        .col = COLOR_CURSOR_DEFAULT, // ABGR
                         .thickness = 1,
                     });
 
                     // draw the timestamp on the text
                     var text_buffer: [32]u8 = undefined;
-                    const text = std.fmt.bufPrint(&text_buffer, "{d:.2}ms", .{(cursor_timestamp_s - timeline_timestamp_begin_s) * 1000.0}) catch unreachable;
-                    const text_size: [2]f32 = zgui.calcTextSize(text, .{});
-                    const text_x = if (cursor_x + 4 + text_size[0] <= timeline_width) (cursor_x + 4) else (cursor_x - 2 - text_size[0]);
-                    draw_list.addTextUnformatted(.{ text_x, viewport_timeline_y_max - 4 - text_size[1] }, 0xFF0000FF, text);
+                    var text = std.fmt.bufPrint(&text_buffer, "{d:.2}ms", .{(cursor_timestamp_s - timeline_timestamp_begin_s) * 1000.0}) catch unreachable;
+                    const text_size_cursor: [2]f32 = zgui.calcTextSize(text, .{});
+                    const text_cursor_x = if (cursor_x + 4 + text_size_cursor[0] <= timeline_width) (cursor_x + 4) else (cursor_x - 2 - text_size_cursor[0]);
+                    const text_y = viewport_timeline_y_max - 4 - text_size_cursor[1];
+                    draw_list.addTextUnformatted(.{ text_cursor_x, text_y }, cursor_color, text);
+
+                    // draw begin/end timestamps
+                    text = std.fmt.bufPrint(&text_buffer, "{d:.2}ms", .{(viewport_timestamp_begin_s - timeline_timestamp_begin_s) * 1000.0}) catch unreachable;
+                    const text_size_begin_timestamp: [2]f32 = zgui.calcTextSize(text, .{});
+                    const text_begin_x = 4;
+                    if (text_begin_x + text_size_begin_timestamp[0] < text_cursor_x - 5) {
+                        draw_list.addTextUnformatted(.{ text_begin_x, text_y }, COLOR_TIMELINE_TEXT, text);
+                    }
+
+                    text = std.fmt.bufPrint(&text_buffer, "{d:.2}ms", .{(viewport_timestamp_end_s - timeline_timestamp_begin_s) * 1000.0}) catch unreachable;
+                    const text_size_end_timestamp: [2]f32 = zgui.calcTextSize(text, .{});
+                    const text_end_x = timeline_width - text_size_end_timestamp[0] - 4;
+                    if (text_end_x > text_cursor_x + text_size_cursor[0] + 4) {
+                        draw_list.addTextUnformatted(.{ text_end_x, text_y }, COLOR_TIMELINE_TEXT, text);
+                    }
                 }
+
+                // TODO draw bookmarks on higher y-level
+
             }
-
-            // draw first, last, and cursor timestamps
-
-            // draw alloc events in buckets? or maybe this is just a frame/bookmark view with the cursor?
-
-            // const timeline_width = backbuffer_width;
-            // const timeline_height = 30.0;
-            // const timeline_y_min = next_window_y;
-            // const timeline_y_max = next_window_y + timeline_height;
-            // }
 
             // zoomable view of memory state at cursor
             {
@@ -548,7 +588,7 @@ fn updateGui(app: *AppContext) !void {
                     draw_list.addRectFilled(.{
                         .pmin = .{ 0, mem_viewport_zoom_bar_y_min },
                         .pmax = .{ backbuffer_width, mem_viewport_zoom_bar_y_max },
-                        .col = 0xFF707070,
+                        .col = COLOR_SECTION_BORDER,
                     });
 
                     const mem_zoom_bar_x_min = 0;
@@ -584,7 +624,7 @@ fn updateGui(app: *AppContext) !void {
                         draw_list.addLine(.{
                             .p1 = .{ 0, mem_viewport_address_ticks_y_max },
                             .p2 = .{ timeline_width, mem_viewport_address_ticks_y_max },
-                            .col = 0xFF707070,
+                            .col = COLOR_SECTION_BORDER,
                             .thickness = 1,
                         });
 
@@ -593,7 +633,7 @@ fn updateGui(app: *AppContext) !void {
                             draw_list.addLine(.{
                                 .p1 = .{ tick_x, mem_viewport_address_ticks_y_min },
                                 .p2 = .{ tick_x, mem_viewport_address_ticks_y_max },
-                                .col = 0xFF707070,
+                                .col = COLOR_SECTION_BORDER,
                                 .thickness = 1,
                             });
                         }
