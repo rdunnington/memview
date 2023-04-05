@@ -389,11 +389,13 @@ fn updateGui(app: *AppContext) !void {
             const timeline_timestamp_end_s = Helpers.usToS(app.mem_stats.last_timestamp);
 
             // viewport
+            gui.viewport_timestamp = std.math.clamp(gui.viewport_timestamp, app.mem_stats.first_timestamp, app.mem_stats.last_timestamp);
             gui.is_dragging_viewport = false;
 
-            const viewport_duration: f64 = timeline_duration / gui.timeline_zoom;
+            var viewport_duration: f64 = timeline_duration / gui.timeline_zoom;
             var timeline_viewport_color: u32 = COLOR_TIMELINE_VIEWPORT_DEFAULT;
 
+            var zooming_focal_timestamp_s: ?f64 = null;
             if (gui.mouse_pos_y >= timeline_y_min and gui.mouse_pos_y <= timeline_y_max and gui.is_dragging_cursor == false) {
                 // const viewport_duration_us: u64 = @floatToInt(u64, viewport_duration * @intToFloat(f64, std.time.us_per_s));
                 // const viewport_width: f64 = (viewport_duration / timeline_duration) * timeline_width;
@@ -402,19 +404,15 @@ fn updateGui(app: *AppContext) !void {
                 // const viewport_x_max = viewport_x_min + (viewport_duration / timeline_duration) * timeline_width;
 
                 if (gui.scroll_delta_y != 0) {
-                    // const mouse_x_in_viewport_normalized = @intToFloat(f32, gui.mouse_pos_x) / timeline_width;
-                    // var focal_timestamp_s = undefined;
                     // if (gui.mouse_pos_x >= viewport_x_min and gui.mouse_pos_x <= viewport_x_max) {
                     //     const focal_location_normalized = @intToFloat(f32, gui.mouse_pos_x) / timeline_width;
-                    //     const focal_timestamp_s = timeline_timestamp_begin_s + focal_location_normalized * timeline_duration;
+                    //     zooming_focal_timestamp_s = timeline_timestamp_begin_s + focal_location_normalized * timeline_duration;
                     // } else {
-                    //     //middle of current viewport, pull in each side evenly
-                    //     const focal_timestamp_s = viewport_timestamp_begin_s + (viewport_duration / 2.0);
+                        // if the mouse is not inside the current viewport, just make the focal point the middle to make the zoom even on both sides
+                        zooming_focal_timestamp_s = viewport_timestamp_begin_s + (viewport_duration / 2.0);
                     // }
 
-                    // zoom into the moused-over location
-                    // gui.target_zoom += gui.scroll_delta_y *
-                    app.gui.timeline_zoom_target = std.math.max(app.gui.timeline_zoom_target + @floatCast(f32, gui.scroll_delta_y * 0.25), 1.0);
+                    gui.timeline_zoom_target = std.math.max(gui.timeline_zoom_target + @floatCast(f32, gui.scroll_delta_y * 0.25), 1.0);
                 }
 
                 timeline_viewport_color = COLOR_TIMELINE_VIEWPORT_HOVER;
@@ -433,7 +431,37 @@ fn updateGui(app: *AppContext) !void {
                 }
             }
 
-            app.gui.timeline_zoom = GuiState.tweenZoom(app.gui.timeline_zoom, app.gui.timeline_zoom_target);
+            // animate zoom values and adjust viewport to keep focal point
+            {
+                // const prev_zoom = app.gui.timeline_zoom;
+                gui.timeline_zoom = GuiState.tweenZoom(app.gui.timeline_zoom, app.gui.timeline_zoom_target);
+
+                const prev_viewport_duration = viewport_duration;
+                viewport_duration = timeline_duration / gui.timeline_zoom;
+
+                // shift the viewport timestamp to keep the zoom focal point the same
+                if (zooming_focal_timestamp_s) |focus_s| {
+                    const viewport_timestamp_begin_s = Helpers.usToS(gui.viewport_timestamp);
+                    const focus_normalized = (focus_s - viewport_timestamp_begin_s) / prev_viewport_duration;
+                    const new_offset_to_viewport_begin_s = focus_normalized * viewport_duration;
+
+                    var viewport_new_begin_s = focus_s - new_offset_to_viewport_begin_s;
+                    viewport_new_begin_s = std.math.max(viewport_new_begin_s, timeline_timestamp_begin_s);
+                    viewport_new_begin_s = std.math.min(viewport_new_begin_s, timeline_timestamp_end_s - viewport_duration);
+
+
+                    // const viewport_timestamp_begin_s = Helpers.usToS(gui.viewport_timestamp);
+                    // const zoom_diff = gui.timeline_zoom - prev_zoom;
+                    // const viewport_timestamp_offset_s = (focus_s - viewport_timestamp_begin_s) * zoom_diff;
+
+                    // var new_viewport_timestamp_begin_s = viewport_timestamp_begin_s + viewport_timestamp_offset_s;
+                    // const max_viewport_timestamp_s = timeline_timestamp_end_s - viewport_duration;
+                    // if (max_viewport_timestamp_s > timeline_timestamp_begin_s) {
+                    //     new_viewport_timestamp_begin_s = std.math.clamp(new_viewport_timestamp_begin_s, timeline_timestamp_begin_s, max_viewport_timestamp_s);
+                    // }
+                    gui.viewport_timestamp = Helpers.sToUs(viewport_new_begin_s);
+                }
+            }
 
             // const viewport_duration: f64 = timeline_duration / gui.timeline_zoom;
             const viewport_duration_us: u64 = Helpers.sToUs(viewport_duration);
@@ -443,7 +471,8 @@ fn updateGui(app: *AppContext) !void {
 
             // draw viewport in the global timeline
             {
-                const viewport_x: f32 = @floatCast(f32, 1.0 - ((timeline_timestamp_end_s - viewport_timestamp_begin_s) / timeline_duration)) * timeline_width;
+                const viewport_x_normalized = (viewport_timestamp_begin_s - timeline_timestamp_begin_s) / timeline_duration;
+                const viewport_x: f64 = viewport_x_normalized * timeline_width;
                 const viewport_width: f64 = (viewport_duration / timeline_duration) * timeline_width;
                 const thickness: f32 = if (gui.is_dragging_viewport) 2 else 1;
 
