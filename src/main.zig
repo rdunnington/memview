@@ -451,20 +451,17 @@ fn updateGui(app: *AppContext) !void {
             {
                 var viewport_zoom_focal_point_normalized: ?f64 = null;
                 if (gui.mouse_pos_y >= timeline_y_min and gui.mouse_pos_y <= timeline_y_max and gui.is_dragging_cursor == false) {
-                    // const viewport_duration_us: u64 = @floatToInt(u64, viewport_duration * @intToFloat(f64, std.time.us_per_s));
-                    // const viewport_width: f64 = (viewport_duration / timeline_duration) * timeline_width;
-                    // const viewport_timestamp_begin_s = Helpers.usToS(gui.viewport_timestamp - std);
-                    // const viewport_x_min = ((timeline_timestamp_end_s - viewport_timestamp_begin_s) / timeline_duration) * timeline_width;
-                    // const viewport_x_max = viewport_x_min + (viewport_duration / timeline_duration) * timeline_width;
+                    const viewport_timestamp = @intToFloat(f64, gui.viewport_timestamp - mem.first_timestamp);
+                    const viewport_x_min = (viewport_timestamp / timeline_duration) * timeline_width;
+                    const viewport_x_max = viewport_x_min + (viewport_duration / timeline_duration) * timeline_width;
 
                     if (gui.scroll_delta_y != 0) {
-                        // if (gui.mouse_pos_x >= viewport_x_min and gui.mouse_pos_x <= viewport_x_max) {
-                        //     const focal_location_normalized = @intToFloat(f32, gui.mouse_pos_x) / timeline_width;
-                        //     zooming_focal_timestamp_s = timeline_timestamp_begin_s + focal_location_normalized * timeline_duration;
-                        // } else {
-                        // if the mouse is not inside the current viewport, just make the focal point the middle to make the zoom even on both sides
-                        viewport_zoom_focal_point_normalized = 0.5;
-                        // }
+                        if (gui.mouse_pos_x >= viewport_x_min and gui.mouse_pos_x <= viewport_x_max) {
+                            viewport_zoom_focal_point_normalized = (gui.mouse_pos_x - viewport_x_min) / (viewport_x_max - viewport_x_min);
+                        } else {
+                            // if the mouse is not inside the current viewport, just make the focal point the middle to make the zoom even on both sides
+                            viewport_zoom_focal_point_normalized = 0.5;
+                        }
 
                         gui.timeline_zoom_target = std.math.max(gui.timeline_zoom_target + @floatCast(f32, gui.scroll_delta_y * 0.25), 1.0);
                     }
