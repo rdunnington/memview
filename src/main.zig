@@ -32,6 +32,25 @@ const GfxState = struct {
     }
 };
 
+const ButtonState = struct {
+    triggered: bool = false,
+    down: bool = false,
+};
+
+const InputState = struct {
+    mouse_button: [@typeInfo(zglfw.MouseButton).Enum.fields.len]ButtonState = [1]ButtonState{.{}} ** 8,
+
+    fn isMouseTriggered(self: *const InputState, button: zglfw.MouseButton) bool {
+        const index = @intCast(usize, @enumToInt(button));
+        return self.mouse_button[index].triggered;
+    }
+
+    fn isMouseDown(self: *const InputState, button: zglfw.MouseButton) bool {
+        const index = @intCast(usize, @enumToInt(button));
+        return self.mouse_button[index].down;
+    }
+};
+
 const GuiState = struct {
     mouse_pos_x: f64 = 0.0,
     mouse_pos_y: f64 = 0.0,
@@ -39,7 +58,9 @@ const GuiState = struct {
     mouse_delta_y: f64 = 0.0,
     scroll_delta_x: f64 = 0.0,
     scroll_delta_y: f64 = 0.0,
-    is_dragging_viewport: bool = false,
+
+    viewport_drag_focus: ?f64 = null,
+    // is_dragging_viewport: bool = false,
     is_dragging_cursor: bool = false,
 
     timeline_zoom: f32 = 1.0,
@@ -104,18 +125,9 @@ const MemoryStats = struct {
         self.cache.blocks.deinit();
     }
 
-    fn timespanUs(self: *MemoryStats) u64 {
+    fn timespanUs(self: *MemoryStats) f64 {
         if (self.first_timestamp < self.last_timestamp) {
-            return self.last_timestamp - self.first_timestamp;
-        }
-        return 0;
-    }
-
-    fn timespanSecs(self: *MemoryStats) f64 {
-        if (self.first_timestamp < self.last_timestamp) {
-            const duration_us = self.last_timestamp - self.first_timestamp;
-            const duration_s = @intToFloat(f64, duration_us) / @intToFloat(f64, std.time.us_per_s);
-            return @floatCast(f32, duration_s);
+            return @intToFloat(f64, self.last_timestamp - self.first_timestamp);
         }
         return 0;
     }
@@ -175,6 +187,7 @@ const AppContext = struct {
     client: ClientContext,
 
     mem_stats: MemoryStats,
+    input: InputState,
     gui: GuiState,
 
     fn init(window: *zglfw.Window, allocator: std.mem.Allocator) !*AppContext {
@@ -183,6 +196,7 @@ const AppContext = struct {
         app.window = window;
         app.client = try ClientContext.init(allocator);
         app.mem_stats = MemoryStats.init(allocator);
+        app.input = InputState{};
         app.gui = GuiState{ .cursors = .{} };
 
         app.gui.cursors.arrow = try zglfw.Cursor.createStandard(.arrow);
@@ -216,6 +230,12 @@ const AppContext = struct {
     }
 };
 
+fn updateInput(input: *InputState) void {
+    for (&input.mouse_button) |*state| {
+        state.triggered = false;
+    }
+}
+
 fn updateMessages(app: *AppContext) !void {
     try client.fetchMessages(&app.client, &app.mem_stats.new_messages);
     for (app.mem_stats.new_messages.items) |msg| {
@@ -244,15 +264,6 @@ fn updateMessages(app: *AppContext) !void {
 }
 
 fn updateGui(app: *AppContext) !void {
-    const Helpers = struct {
-        fn usToS(timestamp: u64) f64 {
-            return @intToFloat(f64, timestamp) / @intToFloat(f64, std.time.us_per_s);
-        }
-        fn sToUs(timestamp: f64) u64 {
-            return @floatToInt(u64, timestamp * @intToFloat(f64, std.time.us_per_s));
-        }
-    };
-
     var gctx: *zgpu.GraphicsContext = app.gfx.gctx;
 
     const backbuffer_width = @intToFloat(f32, gctx.swapchain_descriptor.width);
@@ -310,8 +321,10 @@ fn updateGui(app: *AppContext) !void {
     defer draw_list.popClipRect();
 
     const gui: *GuiState = &app.gui;
-    var next_cursor: *zglfw.Cursor = gui.cursors.arrow;
+    const mem: *MemoryStats = &app.mem_stats;
+    const input: *const InputState = &app.input;
 
+    var next_cursor: *zglfw.Cursor = gui.cursors.arrow;
     {
         const COLOR_SECTION_BORDER = 0xFF707070;
 
@@ -319,9 +332,9 @@ fn updateGui(app: *AppContext) !void {
         const COLOR_CURSOR_HOVER = 0xFF0000FF;
         const COLOR_CURSOR_DRAGGED = 0xFF0000FF;
 
-        const COLOR_TIMELINE_VIEWPORT_DEFAULT = 0xFFFCFF4F;
-        const COLOR_TIMELINE_VIEWPORT_HOVER = 0xFFFCFF4F;
-        const COLOR_TIMELINE_VIEWPORT_DRAGGED = 0xFFFCFF4F;
+        const COLOR_TIMELINE_VIEWPORT_DEFAULT = 0xFF520096;
+        const COLOR_TIMELINE_VIEWPORT_HOVER = 0xFF8C00FF;
+        const COLOR_TIMELINE_VIEWPORT_DRAGGED = 0xFF8C00FF;
         const COLOR_TIMELINE_TEXT = 0xFFD0D0D0;
 
         const timeline_width = backbuffer_width;
@@ -353,10 +366,12 @@ fn updateGui(app: *AppContext) !void {
             .thickness = 1,
         });
 
-        const timeline_duration: f64 = app.mem_stats.timespanSecs();
-        if (timeline_duration > 0.0) {
-            // const timeline_duration_us = @intToFloat(f64, app.mem_stats.timespanUs());
+        const us_per_ms = @intToFloat(f64, std.time.us_per_ms);
 
+        // A note on timestamps... local variables for timestamps are in f64 microseconds, and are always relative to mem.first_timestamp to avoid
+        // floating point precision errors. Whenever storing them back in mem/gui structs, they are stored as absolute u64 timestamps.
+        const timeline_duration: f64 = mem.timespanUs();
+        if (timeline_duration > 0.0) {
             // timeline ticks and labels
             const num_timeline_ticks: usize = 10;
             for (0..num_timeline_ticks + 1) |i| {
@@ -366,11 +381,11 @@ fn updateGui(app: *AppContext) !void {
                     x_offset = 1;
                 }
                 const tick_x = ratio * timeline_width - x_offset;
-                const secs = ratio * timeline_duration;
+                const us = ratio * timeline_duration;
                 draw_list.addLine(.{ .p1 = .{ tick_x, timeline_y_min }, .p2 = .{ tick_x, timeline_y_max }, .col = COLOR_SECTION_BORDER, .thickness = 1 });
 
                 var text_buffer: [32]u8 = undefined;
-                const text = std.fmt.bufPrint(&text_buffer, "{d:.2}ms", .{secs * 1000.0}) catch unreachable;
+                const text = std.fmt.bufPrint(&text_buffer, "{d:.2}ms", .{us / us_per_ms}) catch unreachable;
 
                 const text_size: [2]f32 = zgui.calcTextSize(text, .{});
                 var text_x = tick_x + 4;
@@ -385,96 +400,108 @@ fn updateGui(app: *AppContext) !void {
                 draw_list.addTextUnformatted(.{ text_x, timeline_y_min + 4 }, 0xFFD0D0D0, text);
             }
 
-            const timeline_timestamp_begin_s = Helpers.usToS(app.mem_stats.first_timestamp);
-            const timeline_timestamp_end_s = Helpers.usToS(app.mem_stats.last_timestamp);
-
             // viewport
-            gui.viewport_timestamp = std.math.clamp(gui.viewport_timestamp, app.mem_stats.first_timestamp, app.mem_stats.last_timestamp);
-            gui.is_dragging_viewport = false;
+            gui.viewport_timestamp = std.math.clamp(gui.viewport_timestamp, mem.first_timestamp, mem.last_timestamp);
 
-            var viewport_duration: f64 = timeline_duration / gui.timeline_zoom;
+            var viewport_duration: f64 = std.math.ceil(timeline_duration / gui.timeline_zoom);
             var timeline_viewport_color: u32 = COLOR_TIMELINE_VIEWPORT_DEFAULT;
 
-            var zooming_focal_timestamp_s: ?f64 = null;
-            if (gui.mouse_pos_y >= timeline_y_min and gui.mouse_pos_y <= timeline_y_max and gui.is_dragging_cursor == false) {
-                // const viewport_duration_us: u64 = @floatToInt(u64, viewport_duration * @intToFloat(f64, std.time.us_per_s));
-                // const viewport_width: f64 = (viewport_duration / timeline_duration) * timeline_width;
-                const viewport_timestamp_begin_s = Helpers.usToS(gui.viewport_timestamp);
-                // const viewport_x_min = ((timeline_timestamp_end_s - viewport_timestamp_begin_s) / timeline_duration) * timeline_width;
-                // const viewport_x_max = viewport_x_min + (viewport_duration / timeline_duration) * timeline_width;
+            const is_mouse_in_timeline = gui.mouse_pos_y >= timeline_y_min and gui.mouse_pos_y <= timeline_y_max;
 
-                if (gui.scroll_delta_y != 0) {
-                    // if (gui.mouse_pos_x >= viewport_x_min and gui.mouse_pos_x <= viewport_x_max) {
-                    //     const focal_location_normalized = @intToFloat(f32, gui.mouse_pos_x) / timeline_width;
-                    //     zooming_focal_timestamp_s = timeline_timestamp_begin_s + focal_location_normalized * timeline_duration;
-                    // } else {
-                        // if the mouse is not inside the current viewport, just make the focal point the middle to make the zoom even on both sides
-                        zooming_focal_timestamp_s = viewport_timestamp_begin_s + (viewport_duration / 2.0);
-                    // }
-
-                    gui.timeline_zoom_target = std.math.max(gui.timeline_zoom_target + @floatCast(f32, gui.scroll_delta_y * 0.25), 1.0);
+            // drag viewport in timeline
+            {
+                if (input.isMouseDown(.left) == false) {
+                    gui.viewport_drag_focus = null;
                 }
 
-                timeline_viewport_color = COLOR_TIMELINE_VIEWPORT_HOVER;
+                if (is_mouse_in_timeline and gui.is_dragging_cursor == false) {
+                    const viewport_timestamp = @intToFloat(f64, gui.viewport_timestamp - mem.first_timestamp);
+                    const viewport_x_min = (viewport_timestamp / timeline_duration) * timeline_width;
+                    const viewport_x_max = viewport_x_min + (viewport_duration / timeline_duration) * timeline_width;
+                    const is_mouse_hovering_viewport = is_mouse_in_timeline and gui.mouse_pos_x >= viewport_x_min and gui.mouse_pos_x <= viewport_x_max;
 
-                if (app.window.getMouseButton(.left) == .press) {
-                    gui.is_dragging_viewport = true;
-                    const viewport_timestamp_delta: f64 = viewport_duration * gui.mouse_delta_x * 0.01;
-                    const viewport_timestamp_begin_shifted_s = std.math.clamp(viewport_timestamp_begin_s + viewport_timestamp_delta, timeline_timestamp_begin_s, timeline_timestamp_end_s - viewport_duration);
-                    const viewport_timestamp_begin = Helpers.sToUs(viewport_timestamp_begin_shifted_s);
-                    gui.viewport_timestamp = viewport_timestamp_begin; // std.math.clamp(viewport_timestamp_unclamped, app.mem_stats.first_timestamp, app.mem_stats.last_timestamp - viewport_duration_us);
+                    if (is_mouse_hovering_viewport) {
+                        next_cursor = gui.cursors.hand;
+                        timeline_viewport_color = COLOR_TIMELINE_VIEWPORT_HOVER;
 
+                        if (input.isMouseTriggered(.left)) {
+                            gui.viewport_drag_focus = (gui.mouse_pos_x - viewport_x_min) / (viewport_x_max - viewport_x_min);
+                        }
+                    }
+                }
+
+                if (gui.viewport_drag_focus) |focus| {
                     next_cursor = gui.cursors.hand;
                     timeline_viewport_color = COLOR_TIMELINE_VIEWPORT_DRAGGED;
-                } else if (app.window.getMouseButton(.right) == .press) {
-                    // TODO right click and drag to redefine the viewport
+
+                    // reposition the viewport such that the viewport focus is at the mouse x position
+                    const mouse_timestamp = (gui.mouse_pos_x / timeline_width) * timeline_duration;
+                    const viewport_focus_offset = viewport_duration * focus;
+                    const viewport_timestamp = std.math.floor(mouse_timestamp - viewport_focus_offset);
+                    const viewport_timestamp_clamped = std.math.clamp(viewport_timestamp, 0, timeline_duration - viewport_duration);
+                    gui.viewport_timestamp = @floatToInt(u64, viewport_timestamp_clamped) + mem.first_timestamp;
                 }
+
+                // if (input.isMouseDown(.right) == .press) {
+                //     // TODO right click and drag to redefine the viewport
+                // }
             }
 
-            // animate zoom values and adjust viewport to keep focal point
+            // handle timeline viewport zoom
             {
-                // const prev_zoom = app.gui.timeline_zoom;
-                gui.timeline_zoom = GuiState.tweenZoom(app.gui.timeline_zoom, app.gui.timeline_zoom_target);
+                var viewport_zoom_focal_point_normalized: ?f64 = null;
+                if (gui.mouse_pos_y >= timeline_y_min and gui.mouse_pos_y <= timeline_y_max and gui.is_dragging_cursor == false) {
+                    // const viewport_duration_us: u64 = @floatToInt(u64, viewport_duration * @intToFloat(f64, std.time.us_per_s));
+                    // const viewport_width: f64 = (viewport_duration / timeline_duration) * timeline_width;
+                    // const viewport_timestamp_begin_s = Helpers.usToS(gui.viewport_timestamp - std);
+                    // const viewport_x_min = ((timeline_timestamp_end_s - viewport_timestamp_begin_s) / timeline_duration) * timeline_width;
+                    // const viewport_x_max = viewport_x_min + (viewport_duration / timeline_duration) * timeline_width;
 
-                const prev_viewport_duration = viewport_duration;
-                viewport_duration = timeline_duration / gui.timeline_zoom;
+                    if (gui.scroll_delta_y != 0) {
+                        // if (gui.mouse_pos_x >= viewport_x_min and gui.mouse_pos_x <= viewport_x_max) {
+                        //     const focal_location_normalized = @intToFloat(f32, gui.mouse_pos_x) / timeline_width;
+                        //     zooming_focal_timestamp_s = timeline_timestamp_begin_s + focal_location_normalized * timeline_duration;
+                        // } else {
+                        // if the mouse is not inside the current viewport, just make the focal point the middle to make the zoom even on both sides
+                        viewport_zoom_focal_point_normalized = 0.5;
+                        // }
+
+                        gui.timeline_zoom_target = std.math.max(gui.timeline_zoom_target + @floatCast(f32, gui.scroll_delta_y * 0.25), 1.0);
+                    }
+
+                    timeline_viewport_color = COLOR_TIMELINE_VIEWPORT_HOVER;
+                }
+
+                const prev_zoom = gui.timeline_zoom;
+                // gui.timeline_zoom = GuiState.tweenZoom(app.gui.timeline_zoom, app.gui.timeline_zoom_target);
+                gui.timeline_zoom = app.gui.timeline_zoom_target;
+
+                // const prev_viewport_duration = viewport_duration;
+                viewport_duration = std.math.ceil(timeline_duration / gui.timeline_zoom);
 
                 // shift the viewport timestamp to keep the zoom focal point the same
-                if (zooming_focal_timestamp_s) |focus_s| {
-                    const viewport_timestamp_begin_s = Helpers.usToS(gui.viewport_timestamp);
-                    const focus_normalized = (focus_s - viewport_timestamp_begin_s) / prev_viewport_duration;
-                    const new_offset_to_viewport_begin_s = focus_normalized * viewport_duration;
+                if (prev_zoom != gui.timeline_zoom) {
+                    if (viewport_zoom_focal_point_normalized) |focus_normalized| {
+                        const viewport_timestamp = @intToFloat(f64, gui.viewport_timestamp - mem.first_timestamp);
+                        const prev_viewport_duration = std.math.ceil(timeline_duration / prev_zoom);
 
-                    var viewport_new_begin_s = focus_s - new_offset_to_viewport_begin_s;
-                    viewport_new_begin_s = std.math.max(viewport_new_begin_s, timeline_timestamp_begin_s);
-                    viewport_new_begin_s = std.math.min(viewport_new_begin_s, timeline_timestamp_end_s - viewport_duration);
+                        const viewport_focus_us = viewport_timestamp + focus_normalized * prev_viewport_duration;
+                        const viewport_focus_offset_us = focus_normalized * viewport_duration;
+                        const viewport_timestamp_unclamped = @floatToInt(u64, std.math.max(0, viewport_focus_us - viewport_focus_offset_us)) + mem.first_timestamp;
 
-
-                    // const viewport_timestamp_begin_s = Helpers.usToS(gui.viewport_timestamp);
-                    // const zoom_diff = gui.timeline_zoom - prev_zoom;
-                    // const viewport_timestamp_offset_s = (focus_s - viewport_timestamp_begin_s) * zoom_diff;
-
-                    // var new_viewport_timestamp_begin_s = viewport_timestamp_begin_s + viewport_timestamp_offset_s;
-                    // const max_viewport_timestamp_s = timeline_timestamp_end_s - viewport_duration;
-                    // if (max_viewport_timestamp_s > timeline_timestamp_begin_s) {
-                    //     new_viewport_timestamp_begin_s = std.math.clamp(new_viewport_timestamp_begin_s, timeline_timestamp_begin_s, max_viewport_timestamp_s);
-                    // }
-                    gui.viewport_timestamp = Helpers.sToUs(viewport_new_begin_s);
+                        var viewport_timestamp_clamped = std.math.min(viewport_timestamp_unclamped, mem.last_timestamp - @floatToInt(u64, viewport_duration));
+                        viewport_timestamp_clamped = std.math.max(viewport_timestamp_clamped, mem.first_timestamp);
+                        gui.viewport_timestamp = viewport_timestamp_clamped;
+                    }
                 }
             }
-
-            // const viewport_duration: f64 = timeline_duration / gui.timeline_zoom;
-            const viewport_duration_us: u64 = Helpers.sToUs(viewport_duration);
-            const viewport_timestamp_clamped = std.math.clamp(gui.viewport_timestamp, app.mem_stats.first_timestamp, app.mem_stats.last_timestamp - viewport_duration_us);
-            const viewport_timestamp_begin_s = Helpers.usToS(viewport_timestamp_clamped);
-            const viewport_timestamp_end_s = Helpers.usToS(viewport_timestamp_clamped) + viewport_duration;
 
             // draw viewport in the global timeline
             {
-                const viewport_x_normalized = (viewport_timestamp_begin_s - timeline_timestamp_begin_s) / timeline_duration;
-                const viewport_x: f64 = viewport_x_normalized * timeline_width;
-                const viewport_width: f64 = (viewport_duration / timeline_duration) * timeline_width;
-                const thickness: f32 = if (gui.is_dragging_viewport) 2 else 1;
+                const viewport_timestamp = @intToFloat(f64, gui.viewport_timestamp - mem.first_timestamp);
+                const viewport_x = (viewport_timestamp / timeline_duration) * timeline_width;
+                const viewport_width = timeline_width / gui.timeline_zoom;
+                const thickness: f32 = if (gui.viewport_drag_focus == null) 1 else 2;
 
                 draw_list.addRect(
                     .{
@@ -485,9 +512,6 @@ fn updateGui(app: *AppContext) !void {
                     },
                 );
             }
-
-            const cursor_timestamp_clamped_us: u64 = std.math.clamp(gui.cursor_timestamp, app.mem_stats.first_timestamp, app.mem_stats.last_timestamp);
-            var cursor_timestamp_s: f64 = Helpers.usToS(cursor_timestamp_clamped_us);
 
             // viewport timeline and cursor
             const viewport_timeline_height = 40.0;
@@ -512,28 +536,37 @@ fn updateGui(app: *AppContext) !void {
                 });
 
                 {
-                    var cursor_x: f32 = @floatCast(f32, 1.0 - ((viewport_timestamp_end_s - cursor_timestamp_s) / viewport_duration)) * timeline_width;
+                    // clamp the cursor position to the viewport. ensures if the viewport is moved or the cursor is dragged outside that it stays within bounds
+                    const viewport_timestamp = @intToFloat(f64, gui.viewport_timestamp - mem.first_timestamp);
+                    const viewport_timestamp_end = std.math.ceil(std.math.min(viewport_timestamp + viewport_duration, timeline_duration));
+                    gui.cursor_timestamp = std.math.clamp(gui.cursor_timestamp, mem.first_timestamp, mem.last_timestamp);
+                    var cursor_timestamp = std.math.clamp(@intToFloat(f64, gui.cursor_timestamp - mem.first_timestamp), viewport_timestamp, viewport_timestamp_end);
+
+                    var cursor_x = ((cursor_timestamp - viewport_timestamp) / viewport_duration) * timeline_width;
+
+                    if (input.isMouseDown(.left) == false) {
+                        gui.is_dragging_cursor = false;
+                    }
 
                     const is_mouse_hovering_cursor = gui.mouse_pos_y >= viewport_timeline_y_min and
                         gui.mouse_pos_y <= viewport_timeline_y_max and
                         gui.mouse_pos_x >= (cursor_x - 15.0) and
                         gui.mouse_pos_x <= (cursor_x + 15.0);
-                    const can_drag_cursor: bool = (is_mouse_hovering_cursor or gui.is_dragging_cursor) and gui.is_dragging_viewport == false;
-                    if (can_drag_cursor and app.window.getMouseButton(.left) == .press) {
-                        gui.is_dragging_cursor = true;
+                    const can_drag_cursor: bool = (is_mouse_hovering_cursor or gui.is_dragging_cursor) and gui.viewport_drag_focus == null;
+                    if (can_drag_cursor) {
                         next_cursor = gui.cursors.hand;
+                        if (input.isMouseDown(.left)) {
+                            gui.is_dragging_cursor = true;
 
-                        cursor_timestamp_s = viewport_timestamp_begin_s + (gui.mouse_pos_x / timeline_width) * viewport_duration;
-                    } else {
-                        gui.is_dragging_cursor = false;
+                            cursor_timestamp = (gui.mouse_pos_x / timeline_width) * viewport_duration + viewport_timestamp;
+                            cursor_timestamp = std.math.clamp(cursor_timestamp, viewport_timestamp, viewport_timestamp_end);
+                            cursor_x = ((cursor_timestamp - viewport_timestamp) / viewport_duration) * timeline_width;
+                        }
                     }
 
-                    // clamp the cursor position to the viewport. ensures if the viewport is moved or the cursor is dragged outside that it stays within bounds
-                    cursor_timestamp_s = std.math.clamp(cursor_timestamp_s, viewport_timestamp_begin_s, viewport_timestamp_end_s);
-                    gui.cursor_timestamp = Helpers.sToUs(cursor_timestamp_s);
-                    cursor_x = @floatCast(f32, 1.0 - ((viewport_timestamp_end_s - cursor_timestamp_s) / viewport_duration)) * timeline_width;
+                    gui.cursor_timestamp = @floatToInt(u64, cursor_timestamp) + mem.first_timestamp;
 
-                    try app.mem_stats.updateCache(gui.cursor_timestamp);
+                    try mem.updateCache(gui.cursor_timestamp);
 
                     const cursor_color: u32 = blk: {
                         if (gui.is_dragging_cursor) {
@@ -550,42 +583,46 @@ fn updateGui(app: *AppContext) !void {
 
                     // draw the cursor on the viewport timeline
                     draw_list.addLine(.{
-                        .p1 = .{ cursor_x, viewport_timeline_y_min },
-                        .p2 = .{ cursor_x, viewport_timeline_y_max },
+                        .p1 = .{ @floatCast(f32, cursor_x), viewport_timeline_y_min },
+                        .p2 = .{ @floatCast(f32, cursor_x), viewport_timeline_y_max },
                         .col = cursor_color, // ABGR
                         .thickness = thickness,
                     });
 
                     // draw the cursor on the global timeline
-                    const cursor_x_timeline = @floatCast(f32, 1.0 - ((timeline_timestamp_end_s - cursor_timestamp_s) / timeline_duration)) * timeline_width;
+                    const cursor_x_timeline = (cursor_timestamp / timeline_duration) * timeline_width;
                     draw_list.addLine(.{
-                        .p1 = .{ cursor_x_timeline, timeline_y_min },
-                        .p2 = .{ cursor_x_timeline, timeline_y_max },
+                        .p1 = .{ @floatCast(f32, cursor_x_timeline), timeline_y_min },
+                        .p2 = .{ @floatCast(f32, cursor_x_timeline), timeline_y_max },
                         .col = COLOR_CURSOR_DEFAULT, // ABGR
                         .thickness = 1,
                     });
 
+                    const cursor_timestamp_ms = cursor_timestamp / us_per_ms;
+                    const viewport_timestamp_ms = viewport_timestamp / us_per_ms;
+                    const viewport_timestamp_end_ms = viewport_timestamp_end / us_per_ms;
+
                     // draw the timestamp on the text
                     var text_buffer: [32]u8 = undefined;
-                    var text = std.fmt.bufPrint(&text_buffer, "{d:.2}ms", .{(cursor_timestamp_s - timeline_timestamp_begin_s) * 1000.0}) catch unreachable;
+                    var text = std.fmt.bufPrint(&text_buffer, "{d:.2}ms", .{cursor_timestamp_ms}) catch unreachable;
                     const text_size_cursor: [2]f32 = zgui.calcTextSize(text, .{});
                     const text_cursor_x = if (cursor_x + 4 + text_size_cursor[0] <= timeline_width) (cursor_x + 4) else (cursor_x - 2 - text_size_cursor[0]);
                     const text_y = viewport_timeline_y_max - 4 - text_size_cursor[1];
-                    draw_list.addTextUnformatted(.{ text_cursor_x, text_y }, cursor_color, text);
+                    draw_list.addTextUnformatted(.{ @floatCast(f32, text_cursor_x), text_y }, cursor_color, text);
 
                     // draw begin/end timestamps
-                    text = std.fmt.bufPrint(&text_buffer, "{d:.2}ms", .{(viewport_timestamp_begin_s - timeline_timestamp_begin_s) * 1000.0}) catch unreachable;
+                    text = std.fmt.bufPrint(&text_buffer, "{d:.2}ms", .{viewport_timestamp_ms}) catch unreachable;
                     const text_size_begin_timestamp: [2]f32 = zgui.calcTextSize(text, .{});
                     const text_begin_x = 4;
                     if (text_begin_x + text_size_begin_timestamp[0] < text_cursor_x - 5) {
-                        draw_list.addTextUnformatted(.{ text_begin_x, text_y }, COLOR_TIMELINE_TEXT, text);
+                        draw_list.addTextUnformatted(.{ @floatCast(f32, text_begin_x), text_y }, COLOR_TIMELINE_TEXT, text);
                     }
 
-                    text = std.fmt.bufPrint(&text_buffer, "{d:.2}ms", .{(viewport_timestamp_end_s - timeline_timestamp_begin_s) * 1000.0}) catch unreachable;
+                    text = std.fmt.bufPrint(&text_buffer, "{d:.2}ms", .{viewport_timestamp_end_ms}) catch unreachable;
                     const text_size_end_timestamp: [2]f32 = zgui.calcTextSize(text, .{});
                     const text_end_x = timeline_width - text_size_end_timestamp[0] - 4;
                     if (text_end_x > text_cursor_x + text_size_cursor[0] + 4) {
-                        draw_list.addTextUnformatted(.{ text_end_x, text_y }, COLOR_TIMELINE_TEXT, text);
+                        draw_list.addTextUnformatted(.{ @floatCast(f32, text_end_x), text_y }, COLOR_TIMELINE_TEXT, text);
                     }
                 }
 
@@ -607,7 +644,7 @@ fn updateGui(app: *AppContext) !void {
                 }
 
                 if (is_mouse_in_mem_viewport and app.window.getMouseButton(.left) == .press) {
-                    app.mem_stats.cache.selected_block = null;
+                    mem.cache.selected_block = null;
                 }
 
                 gui.mem_zoom = GuiState.tweenZoom(gui.mem_zoom, gui.mem_zoom_target);
@@ -636,7 +673,7 @@ fn updateGui(app: *AppContext) !void {
                 const mem_viewport_blocks_y_min = mem_viewport_address_ticks_y_max + 1;
                 const mem_viewport_blocks_y_max = backbuffer_height;
 
-                const cache: *MemoryStats.Cache = &app.mem_stats.cache;
+                const cache: *MemoryStats.Cache = &mem.cache;
 
                 if (cache.blocks.items.len > 0) {
                     const kb = 1024;
@@ -740,6 +777,8 @@ fn draw(app: *AppContext) void {
 
 fn onScrolled(window: *zglfw.Window, xoffset: f64, yoffset: f64) callconv(.C) void {
     const app = @ptrCast(*AppContext, @alignCast(@alignOf(AppContext), glfwGetWindowUserPointer(window)));
+
+    // TODO move to input
     app.gui.scroll_delta_x = xoffset;
     app.gui.scroll_delta_y = yoffset;
 }
@@ -747,11 +786,21 @@ fn onScrolled(window: *zglfw.Window, xoffset: f64, yoffset: f64) callconv(.C) vo
 fn onCursorPos(window: *zglfw.Window, xpos: f64, ypos: f64) callconv(.C) void {
     const app = @ptrCast(*AppContext, @alignCast(@alignOf(AppContext), glfwGetWindowUserPointer(window)));
 
+    // TODO move to input
     app.gui.mouse_delta_x = xpos - app.gui.mouse_pos_x;
     app.gui.mouse_delta_y = ypos - app.gui.mouse_pos_y;
 
     app.gui.mouse_pos_x = xpos;
     app.gui.mouse_pos_y = ypos;
+}
+
+fn onMouseButton(window: *zglfw.Window, button: zglfw.MouseButton, action: zglfw.Action, _: zglfw.Mods) callconv(.C) void {
+    const app = @ptrCast(*AppContext, @alignCast(@alignOf(AppContext), glfwGetWindowUserPointer(window)));
+
+    const index = @intCast(usize, @enumToInt(button));
+    const button_state: *ButtonState = &app.input.mouse_button[index];
+    button_state.triggered = button_state.down == false and action == .press;
+    button_state.down = action != .release;
 }
 
 pub fn main() !void {
@@ -769,6 +818,7 @@ pub fn main() !void {
     window.setSizeLimits(400, 400, -1, -1);
     window.setScrollCallback(onScrolled);
     window.setCursorPosCallback(onCursorPos);
+    window.setMouseButtonCallback(onMouseButton);
 
     var gpa = std.heap.GeneralPurposeAllocator(.{ .stack_trace_frames = 16 }){};
     var allocator = gpa.allocator();
@@ -801,6 +851,7 @@ pub fn main() !void {
 
         try updateMessages(app);
         try updateGui(app);
+        updateInput(&app.input);
         draw(app);
     }
 
