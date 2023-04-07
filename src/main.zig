@@ -342,6 +342,10 @@ fn updateGui(app: *AppContext) !void {
         const timeline_y_min = next_window_y;
         const timeline_y_max = next_window_y + timeline_height;
 
+        const viewport_timeline_height = 40.0;
+        const viewport_timeline_y_min = timeline_y_max + 1;
+        const viewport_timeline_y_max = viewport_timeline_y_min + viewport_timeline_height;
+
         draw_list.addRectFilled(
             .{
                 .pmin = .{ 0, timeline_y_min },
@@ -407,6 +411,7 @@ fn updateGui(app: *AppContext) !void {
             var timeline_viewport_color: u32 = COLOR_TIMELINE_VIEWPORT_DEFAULT;
 
             const is_mouse_in_timeline = gui.mouse_pos_y >= timeline_y_min and gui.mouse_pos_y <= timeline_y_max;
+            const is_mouse_in_viewport_timeline = gui.mouse_pos_y >= viewport_timeline_y_min and gui.mouse_pos_y <= viewport_timeline_y_max;
 
             // drag viewport in timeline
             {
@@ -450,30 +455,31 @@ fn updateGui(app: *AppContext) !void {
             // handle timeline viewport zoom
             {
                 var viewport_zoom_focal_point_normalized: ?f64 = null;
-                if (gui.mouse_pos_y >= timeline_y_min and gui.mouse_pos_y <= timeline_y_max and gui.is_dragging_cursor == false) {
+                if (gui.is_dragging_cursor == false) {
                     const viewport_timestamp = @intToFloat(f64, gui.viewport_timestamp - mem.first_timestamp);
                     const viewport_x_min = (viewport_timestamp / timeline_duration) * timeline_width;
                     const viewport_x_max = viewport_x_min + (viewport_duration / timeline_duration) * timeline_width;
 
                     if (gui.scroll_delta_y != 0) {
-                        if (gui.mouse_pos_x >= viewport_x_min and gui.mouse_pos_x <= viewport_x_max) {
-                            viewport_zoom_focal_point_normalized = (gui.mouse_pos_x - viewport_x_min) / (viewport_x_max - viewport_x_min);
-                        } else {
-                            // if the mouse is not inside the current viewport, just make the focal point the middle to make the zoom even on both sides
-                            viewport_zoom_focal_point_normalized = 0.5;
+                        if (is_mouse_in_timeline) {
+                            if (gui.mouse_pos_x >= viewport_x_min and gui.mouse_pos_x <= viewport_x_max) {
+                                viewport_zoom_focal_point_normalized = (gui.mouse_pos_x - viewport_x_min) / (viewport_x_max - viewport_x_min);
+                            } else {
+                                // if the mouse is not inside the current viewport, just make the focal point the middle to make the zoom even on both sides
+                                viewport_zoom_focal_point_normalized = 0.5;
+                            }
+                        } else if (is_mouse_in_viewport_timeline) {
+                            viewport_zoom_focal_point_normalized = gui.mouse_pos_x / timeline_width;
                         }
 
                         gui.timeline_zoom_target = std.math.max(gui.timeline_zoom_target + @floatCast(f32, gui.scroll_delta_y * 0.25), 1.0);
                     }
-
-                    timeline_viewport_color = COLOR_TIMELINE_VIEWPORT_HOVER;
                 }
 
                 const prev_zoom = gui.timeline_zoom;
                 // gui.timeline_zoom = GuiState.tweenZoom(app.gui.timeline_zoom, app.gui.timeline_zoom_target);
                 gui.timeline_zoom = app.gui.timeline_zoom_target;
 
-                // const prev_viewport_duration = viewport_duration;
                 viewport_duration = std.math.ceil(timeline_duration / gui.timeline_zoom);
 
                 // shift the viewport timestamp to keep the zoom focal point the same
@@ -511,10 +517,6 @@ fn updateGui(app: *AppContext) !void {
             }
 
             // viewport timeline and cursor
-            const viewport_timeline_height = 40.0;
-            const viewport_timeline_y_min = timeline_y_max + 1;
-            const viewport_timeline_y_max = viewport_timeline_y_min + viewport_timeline_height;
-
             {
                 draw_list.addRectFilled(
                     .{
