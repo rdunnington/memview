@@ -71,6 +71,7 @@ const GuiState = struct {
 
     cursor_timestamp: u64 = 0,
     viewport_timestamp: u64 = 0,
+    mem_view_address_base: u64 = 0,
 
     cursors: struct {
         arrow: *zglfw.Cursor = undefined,
@@ -639,20 +640,43 @@ fn updateGui(app: *AppContext) !void {
                 const mem_viewport_zoom_bar_y_min = mem_viewport_y_min;
                 const mem_viewport_zoom_bar_y_max = mem_viewport_zoom_bar_y_min + 6;
 
+                const kb = 1024;
+                const kb64 = kb * 64;
+
+                const cache: *MemoryStats.Cache = &mem.cache;
+                const cache_first_address = cache.lowest_address - (cache.lowest_address % kb64);
+                const cache_last_address = cache.highest_address + (cache.highest_address % kb64);
+
+                const cache_address_space_global = @intToFloat(f64, cache_last_address - cache_first_address);
+
+                {
+                    const address_space_zoomed = cache_address_space_global / gui.mem_zoom;
+                    gui.mem_view_address_base = std.math.max(gui.mem_view_address_base, cache_first_address);
+                    gui.mem_view_address_base = std.math.min(gui.mem_view_address_base, cache_last_address - @floatToInt(u64, address_space_zoomed));
+                }
+
                 var mem_viewport_zoom_focal_point_normalized: ?f64 = null;
                 const is_mouse_in_mem_viewport = gui.mouse_pos_y >= mem_viewport_y_min and gui.mouse_pos_y <= mem_viewport_y_max;
                 if (is_mouse_in_mem_viewport and gui.scroll_delta_y != 0 and gui.viewport_drag_focus == null and gui.is_dragging_cursor == false) {
-                    mem_viewport_zoom_focal_point_normalized = gui.mouse_pos_x / timeline_width;
+                    if (gui.mouse_pos_y <= mem_viewport_zoom_bar_y_max) {
+                        mem_viewport_zoom_focal_point_normalized = gui.mouse_pos_x / backbuffer_width;
+                    } else {
+                        const mouse_pos_x_normalized = gui.mouse_pos_x / backbuffer_width;
 
-                    const delta_multiplier: f64 = if (app.window.getKey(.left_shift) == .press or app.window.getKey(.right_shift) == .press) 1 else 0.25;
+                        const address_space_zoomed = cache_address_space_global / gui.mem_zoom;
+                        const address_offset_begin = @intToFloat(f64, gui.mem_view_address_base - cache_first_address);
+                        const focal_address = address_offset_begin + (address_space_zoomed * mouse_pos_x_normalized);
+
+                        mem_viewport_zoom_focal_point_normalized = focal_address / cache_address_space_global;
+                    }
+
+                    const delta_multiplier: f64 = if (app.window.getKey(.left_shift) == .press or app.window.getKey(.right_shift) == .press) 4 else 0.25;
                     app.gui.mem_zoom_target = std.math.max(app.gui.mem_zoom_target + @floatCast(f32, gui.scroll_delta_y * delta_multiplier), 1.0);
                 }
 
                 if (is_mouse_in_mem_viewport and input.isMouseDown(.left)) {
                     mem.cache.selected_block = null;
                 }
-
-                const cache: *MemoryStats.Cache = &mem.cache;
 
                 // gui.mem_zoom = GuiState.tweenZoom(gui.mem_zoom, gui.mem_zoom_target);
                 {
@@ -661,47 +685,20 @@ fn updateGui(app: *AppContext) !void {
 
                     if (prev_zoom != gui.mem_zoom) {
                         if (mem_viewport_zoom_focal_point_normalized) |focus_normalized| {
-                            _ = focus_normalized;
+                            const address_offset_begin = @intToFloat(f64, gui.mem_view_address_base - cache_first_address);
 
-                            // what we want to do here is determine the view into the global address space based onthe zoom.
-                            // need to recalculate the base address of the view
+                            const address_space_zoomed = cache_address_space_global / gui.mem_zoom;
+                            const address_space_zoomed_prev = cache_address_space_global / prev_zoom;
 
-                            // const address_space = mem.highest_address - mem.lowest_address;
-
-                            // const prev_address_space = cache.lowest_address
-
-                            // const mem_view_address_base = @intToFloat(f64,  - mem.lowest_address);
-                            // const prev_viewport_length = std.math.ceil(timeline_duration / prev_zoom);
-
-                            // const viewport_focus_us = viewport_timestamp + focus_normalized * prev_viewport_duration;
-                            // const viewport_focus_offset_us = focus_normalized * viewport_duration;
-                            // const viewport_timestamp_unclamped = @floatToInt(u64, std.math.max(0, viewport_focus_us - viewport_focus_offset_us)) + mem.first_timestamp;
-
-                            // var viewport_timestamp_clamped = std.math.min(viewport_timestamp_unclamped, mem.last_timestamp - @floatToInt(u64, viewport_duration));
-                            // viewport_timestamp_clamped = std.math.max(viewport_timestamp_clamped, mem.first_timestamp);
-
-                            // gui.viewport_timestamp = viewport_timestamp_clamped;
-
-                            // const viewport_focus_us = viewport_timestamp + focus_normalized * prev_viewport_duration;
-                            // const viewport_focus_offset_us = focus_normalized * viewport_duration;
-                            // const viewport_timestamp_unclamped = @floatToInt(u64, std.math.max(0, viewport_focus_us - viewport_focus_offset_us)) + mem.first_timestamp;
-
-                            // var viewport_timestamp_clamped = std.math.min(viewport_timestamp_unclamped, mem.last_timestamp - @floatToInt(u64, viewport_duration));
-                            // viewport_timestamp_clamped = std.math.max(viewport_timestamp_clamped, mem.first_timestamp);
-
-                            // gui.viewport_timestamp = viewport_timestamp_clamped;
+                            const focus_address = address_offset_begin + focus_normalized * address_space_zoomed_prev;
+                            const focus_offset = focus_normalized * address_space_zoomed;
+                            const base_address_unclamped = @floatToInt(u64, std.math.max(0.0, focus_address - focus_offset)) + cache_first_address;
+                            gui.mem_view_address_base = std.math.clamp(base_address_unclamped, cache_first_address, cache_last_address);
                         }
                     }
                 }
 
-                const kb = 1024;
-                const kb64 = kb * 64;
-
-                const cache_first_address = cache.lowest_address - (cache.lowest_address % kb64);
-                const cache_last_address = cache.highest_address + (cache.highest_address % kb64);
-
-                const cache_address_space_global = @intToFloat(f64, cache_last_address - cache_first_address);
-                const cache_address_space = cache_address_space_global / gui.mem_zoom;
+                const address_space_zoomed = cache_address_space_global / gui.mem_zoom;
 
                 // render memory view zoom
                 {
@@ -711,11 +708,10 @@ fn updateGui(app: *AppContext) !void {
                         .col = COLOR_SECTION_BORDER,
                     });
 
-                    // gui.mem_viewport_address
-                    // mem_viewport_zoom_bar_y_max
+                    const addess_bar_begin_normalized = @intToFloat(f64, gui.mem_view_address_base - cache_first_address) / cache_address_space_global;
 
-                    const mem_zoom_bar_x_min = 0;
-                    const mem_zoom_bar_x_max = backbuffer_width / @floatCast(f32, gui.mem_zoom);
+                    const mem_zoom_bar_x_min = @floatCast(f32, addess_bar_begin_normalized * backbuffer_width);
+                    const mem_zoom_bar_x_max = mem_zoom_bar_x_min + (backbuffer_width / @floatCast(f32, gui.mem_zoom));
 
                     draw_list.addRectFilled(.{
                         .pmin = .{ mem_zoom_bar_x_min, mem_viewport_zoom_bar_y_min + 1 },
@@ -737,13 +733,13 @@ fn updateGui(app: *AppContext) !void {
 
                         draw_list.addLine(.{
                             .p1 = .{ 0, mem_viewport_address_ticks_y_max },
-                            .p2 = .{ timeline_width, mem_viewport_address_ticks_y_max },
+                            .p2 = .{ backbuffer_width, mem_viewport_address_ticks_y_max },
                             .col = COLOR_SECTION_BORDER,
                             .thickness = 1,
                         });
 
                         for (0..num_64k_pages) |i| {
-                            const tick_x = (@intToFloat(f32, i) / @intToFloat(f32, num_64k_pages)) * timeline_width;
+                            const tick_x = (@intToFloat(f32, i) / @intToFloat(f32, num_64k_pages)) * backbuffer_width;
                             draw_list.addLine(.{
                                 .p1 = .{ tick_x, mem_viewport_address_ticks_y_min },
                                 .p2 = .{ tick_x, mem_viewport_address_ticks_y_max },
@@ -753,15 +749,23 @@ fn updateGui(app: *AppContext) !void {
                         }
                     }
 
+                    const mem_view_address_begin = gui.mem_view_address_base;
+                    const mem_view_address_end = mem_view_address_begin + @floatToInt(u64, std.math.ceil(address_space_zoomed));
+
                     for (cache.blocks.items) |*block| {
                         const block_start_address = block.address;
                         const block_end_address = block.address + block.size;
 
-                        const start_address_offset = block_start_address - cache_first_address;
-                        const end_address_offset = block_end_address - cache_first_address;
+                        // cull blocks that aren't in the view
+                        if (block_end_address < mem_view_address_begin or block_start_address > mem_view_address_end) {
+                            continue;
+                        }
 
-                        const block_x_start = (@intToFloat(f64, start_address_offset) / cache_address_space) * timeline_width;
-                        const block_x_end_real = (@intToFloat(f64, end_address_offset) / cache_address_space) * timeline_width;
+                        const start_address_offset = std.math.max(block_start_address, mem_view_address_begin) - mem_view_address_begin;
+                        const end_address_offset = block_end_address - mem_view_address_begin;
+
+                        const block_x_start = (@intToFloat(f64, start_address_offset) / address_space_zoomed) * backbuffer_width;
+                        const block_x_end_real = (@intToFloat(f64, end_address_offset) / address_space_zoomed) * backbuffer_width;
                         const block_x_end = std.math.max(block_x_start + 1.0, block_x_end_real);
 
                         if (is_mouse_in_mem_viewport and input.isMouseDown(.left) and gui.mouse_pos_x >= block_x_start and gui.mouse_pos_x <= block_x_end) {
@@ -787,6 +791,8 @@ fn updateGui(app: *AppContext) !void {
                         }
                     }
                 }
+
+                // TODO draw ticks and addresses for the current zoomed address space
             }
         }
     }
