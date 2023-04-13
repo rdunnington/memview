@@ -34,15 +34,21 @@ const GfxState = struct {
 
 const ButtonState = struct {
     triggered: bool = false,
+    release_triggered: bool = false,
     down: bool = false,
 };
 
 const InputState = struct {
     mouse_button: [@typeInfo(zglfw.MouseButton).Enum.fields.len]ButtonState = [1]ButtonState{.{}} ** 8,
 
-    fn isMouseTriggered(self: *const InputState, button: zglfw.MouseButton) bool {
+    fn isMouseDownTriggered(self: *const InputState, button: zglfw.MouseButton) bool {
         const index = @intCast(usize, @enumToInt(button));
         return self.mouse_button[index].triggered;
+    }
+
+    fn isMouseReleaseTriggered(self: *const InputState, button: zglfw.MouseButton) bool {
+        const index = @intCast(usize, @enumToInt(button));
+        return self.mouse_button[index].release_triggered;
     }
 
     fn isMouseDown(self: *const InputState, button: zglfw.MouseButton) bool {
@@ -60,8 +66,8 @@ const GuiState = struct {
     scroll_delta_y: f64 = 0.0,
 
     viewport_drag_focus: ?f64 = null,
-    // is_dragging_viewport: bool = false,
     is_dragging_cursor: bool = false,
+    is_dragging_mem_view: bool = false,
 
     timeline_zoom: f32 = 1.0,
     timeline_zoom_target: f32 = 1.0,
@@ -234,6 +240,7 @@ const AppContext = struct {
 fn updateInput(input: *InputState) void {
     for (&input.mouse_button) |*state| {
         state.triggered = false;
+        state.release_triggered = false;
     }
 }
 
@@ -304,15 +311,17 @@ fn updateGui(app: *AppContext) !void {
     if (zgui.begin("call_tree", .{ .flags = call_tree_flags })) {
         if (app.mem_stats.cache.selected_block) |block| {
             zgui.text("selected_block at 0x{X} with size {} bytes", .{ block.address, block.size });
+        } else {
+            zgui.textUnformatted("Select a block in the memory view to view its details.");
         }
-        zgui.textUnformatted("Call tree goes here");
-        if (zgui.treeNodeStrId("tree_id1", "My Tree {d}", .{1})) {
-            if (zgui.treeNodeStrId("tree_id2", "My Tree {d}", .{2})) {
-                zgui.textUnformatted("Some content...");
-                zgui.treePop();
-            }
-            zgui.treePop();
-        }
+        // zgui.textUnformatted("Call tree goes here");
+        // if (zgui.treeNodeStrId("tree_id1", "My Tree {d}", .{1})) {
+        //     if (zgui.treeNodeStrId("tree_id2", "My Tree {d}", .{2})) {
+        //         zgui.textUnformatted("Some content...");
+        //         zgui.treePop();
+        //     }
+        //     zgui.treePop();
+        // }
         next_window_y += zgui.getWindowHeight();
         zgui.end();
     }
@@ -420,7 +429,7 @@ fn updateGui(app: *AppContext) !void {
                     gui.viewport_drag_focus = null;
                 }
 
-                if (is_mouse_in_timeline and gui.is_dragging_cursor == false) {
+                if (is_mouse_in_timeline and gui.is_dragging_cursor == false and gui.is_dragging_mem_view == false) {
                     const viewport_timestamp = @intToFloat(f64, gui.viewport_timestamp - mem.first_timestamp);
                     const viewport_x_min = (viewport_timestamp / timeline_duration) * timeline_width;
                     const viewport_x_max = viewport_x_min + (viewport_duration / timeline_duration) * timeline_width;
@@ -430,7 +439,7 @@ fn updateGui(app: *AppContext) !void {
                         next_cursor = gui.cursors.hand;
                         timeline_viewport_color = COLOR_TIMELINE_VIEWPORT_HOVER;
 
-                        if (input.isMouseTriggered(.left)) {
+                        if (input.isMouseDownTriggered(.left)) {
                             gui.viewport_drag_focus = (gui.mouse_pos_x - viewport_x_min) / (viewport_x_max - viewport_x_min);
                         }
                     }
@@ -554,7 +563,7 @@ fn updateGui(app: *AppContext) !void {
                         gui.mouse_pos_y <= viewport_timeline_y_max and
                         gui.mouse_pos_x >= (cursor_x - 15.0) and
                         gui.mouse_pos_x <= (cursor_x + 15.0);
-                    const can_drag_cursor: bool = (is_mouse_hovering_cursor or gui.is_dragging_cursor) and gui.viewport_drag_focus == null;
+                    const can_drag_cursor: bool = (is_mouse_hovering_cursor or gui.is_dragging_cursor) and gui.viewport_drag_focus == null and gui.is_dragging_mem_view == false;
                     if (can_drag_cursor) {
                         next_cursor = gui.cursors.hand;
                         if (input.isMouseDown(.left)) {
@@ -694,11 +703,30 @@ fn updateGui(app: *AppContext) !void {
                             const focus_offset = focus_normalized * address_space_zoomed;
                             const base_address_unclamped = @floatToInt(u64, std.math.max(0.0, focus_address - focus_offset)) + cache_first_address;
                             gui.mem_view_address_base = std.math.clamp(base_address_unclamped, cache_first_address, cache_last_address);
+                            // std.debug.print("focus_address: 0x{X}\n", .{@floatToInt(u64, focus_address)});
                         }
                     }
                 }
 
                 const address_space_zoomed = cache_address_space_global / gui.mem_zoom;
+
+                // drag to shift mem view
+                const can_drag_mem_view = is_mouse_in_mem_viewport and gui.mouse_delta_x != 0 and gui.viewport_drag_focus == null and gui.is_dragging_cursor == false;
+                if (input.isMouseDown(.left) and (can_drag_mem_view or gui.is_dragging_mem_view)) {
+                    gui.is_dragging_mem_view = true;
+
+                    const address_delta = gui.mouse_delta_x * (address_space_zoomed / backbuffer_width);
+                    const address_offset_begin = @intToFloat(f64, gui.mem_view_address_base - cache_first_address);
+                    const new_address_offset_begin = address_offset_begin - address_delta;
+
+                    const base_address_unclamped = @floatToInt(u64, std.math.max(0.0, new_address_offset_begin)) + cache_first_address;
+                    gui.mem_view_address_base = std.math.max(base_address_unclamped, cache_first_address);
+                    gui.mem_view_address_base = std.math.min(gui.mem_view_address_base, cache_last_address - @floatToInt(u64, address_space_zoomed));
+                }
+
+                if (input.isMouseDown(.left) == false and gui.is_dragging_mem_view) {
+                    gui.is_dragging_mem_view = false;
+                }
 
                 // render memory view zoom
                 {
@@ -769,7 +797,9 @@ fn updateGui(app: *AppContext) !void {
                         const block_x_end = std.math.max(block_x_start + 1.0, block_x_end_real);
 
                         if (is_mouse_in_mem_viewport and input.isMouseDown(.left) and gui.mouse_pos_x >= block_x_start and gui.mouse_pos_x <= block_x_end) {
-                            cache.selected_block = block;
+                            if (gui.is_dragging_cursor == false and gui.viewport_drag_focus == null) {
+                                cache.selected_block = block;
+                            }
                         }
 
                         draw_list.addRectFilled(
@@ -855,6 +885,7 @@ fn onMouseButton(window: *zglfw.Window, button: zglfw.MouseButton, action: zglfw
     const index = @intCast(usize, @enumToInt(button));
     const button_state: *ButtonState = &app.input.mouse_button[index];
     button_state.triggered = button_state.down == false and action == .press;
+    button_state.release_triggered = action == .release and button_state.down == true;
     button_state.down = action != .release;
 }
 
