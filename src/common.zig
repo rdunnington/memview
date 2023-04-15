@@ -7,6 +7,7 @@ pub const MessageType = enum(u8) {
     Identifier,
     Region,
     Frame,
+    Stack,
     Alloc,
     Free,
 };
@@ -31,8 +32,13 @@ pub const Frame = struct {
     timestamp: u64,
 };
 
+pub const Stack = struct {
+    stack_id: u64,
+    string: []const u8,
+};
+
 pub const Alloc = struct {
-    id_hash: u64, // callstack
+    stack_id: u64, // callstack
     address: u64,
     size: u64,
     timestamp: u64,
@@ -48,6 +54,7 @@ pub const Message = union(MessageType) {
     Identifier: Identifier,
     Region: Region,
     Frame: Frame,
+    Stack: Stack,
     Alloc: Alloc,
     Free: Free,
 
@@ -60,6 +67,7 @@ pub const Message = union(MessageType) {
             .Identifier => |v| v.name.len + @sizeOf(u16), // identifier lengths are never longer than a u16 can hold
             .Region => @sizeOf(u64) * 3,
             .Frame => @sizeOf(u64),
+            .Stack => |v| @sizeOf(u64) + @sizeOf(u16) + v.string.len,
             .Alloc => @sizeOf(u64) * 5,
             .Free => @sizeOf(u64) * 2,
         };
@@ -86,8 +94,13 @@ pub const Message = union(MessageType) {
             .Frame => |v| {
                 writer.writeIntLittle(u64, v.timestamp) catch unreachable;
             },
+            .Stack => |v| {
+                writer.writeIntLittle(u64, v.stack_id) catch unreachable;
+                writer.writeIntLittle(u16, @intCast(u16, v.string.len)) catch unreachable;
+                _ = writer.write(v.string) catch unreachable;
+            },
             .Alloc => |v| {
-                writer.writeIntLittle(u64, v.id_hash) catch unreachable;
+                writer.writeIntLittle(u64, v.stack_id) catch unreachable;
                 writer.writeIntLittle(u64, v.address) catch unreachable;
                 writer.writeIntLittle(u64, v.size) catch unreachable;
                 writer.writeIntLittle(u64, v.timestamp) catch unreachable;
@@ -119,14 +132,10 @@ pub const Message = union(MessageType) {
 
             switch (msg_type) {
                 .Identifier => {
-                    const strlen = reader.readIntLittle(u16) catch break;
-                    const str = fbs.buffer[fbs.pos .. fbs.pos + strlen];
-                    const strpool_str = try strpool.put(str);
-                    fbs.seekBy(strlen) catch break;
-
+                    const str = try readstr(&fbs, strpool) orelse break;
                     msg = Message{
                         .Identifier = .{
-                            .name = strpool_str,
+                            .name = str,
                         },
                     };
                 },
@@ -150,15 +159,26 @@ pub const Message = union(MessageType) {
                         },
                     };
                 },
+                .Stack => {
+                    const stack_id = reader.readIntLittle(u64) catch break;
+                    const str = try readstr(&fbs, strpool) orelse break;
+                    std.debug.print("got stack msg with id 0x{X} and str:\n\t{s}\n", .{ stack_id, str });
+                    msg = Message{
+                        .Stack = .{
+                            .stack_id = stack_id,
+                            .string = str,
+                        },
+                    };
+                },
                 .Alloc => {
-                    const callstack_id = reader.readIntLittle(u64) catch break;
+                    const stack_id = reader.readIntLittle(u64) catch break;
                     const address = reader.readIntLittle(u64) catch break;
                     const size = reader.readIntLittle(u64) catch break;
                     const timestamp = reader.readIntLittle(u64) catch break;
                     const region = reader.readIntLittle(u64) catch break;
                     msg = Message{
                         .Alloc = .{
-                            .id_hash = callstack_id,
+                            .stack_id = stack_id,
                             .address = address,
                             .size = size,
                             .timestamp = timestamp,
@@ -186,5 +206,15 @@ pub const Message = union(MessageType) {
         }
 
         return consumed_bytes;
+    }
+
+    fn readstr(fbs: anytype, strpool: *StringPool) !?[]const u8 {
+        var reader = fbs.reader();
+
+        const strlen = reader.readIntLittle(u16) catch return null;
+        const str = fbs.buffer[fbs.pos .. fbs.pos + strlen];
+        const strpool_str = try strpool.put(str);
+        fbs.seekBy(strlen) catch null;
+        return strpool_str;
     }
 };

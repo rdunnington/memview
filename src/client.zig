@@ -33,6 +33,7 @@ pub const ClientContext = struct {
 
     pub fn deinit(self: *ClientContext) void {
         self.shared_message_buffer.deinit();
+        self.stringpool.deinit();
         self.allocator.free(self.receive_buffer);
     }
 };

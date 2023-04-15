@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const network = @import("network");
 const common = @import("common.zig");
 
@@ -6,9 +7,17 @@ const Message = common.Message;
 
 const c_context: ?*HostContext = null;
 
-// C API
-pub fn memview_init(memview_resource_buffer: [*]u8, buffer_size: c_ulonglong) callconv(.C) bool {
+pub fn memview_calc_min_required_memory(bytes_for_stacktrace: c_ulonglong) callconv(.C) c_ulonglong {
     const opts = HostContextOpts{
+        .bytes_for_stacktrace = bytes_for_stacktrace,
+        .max_instrumented_allocators = 0,
+    };
+    return HostContext.calcMinRequiredMemory(opts);
+}
+
+pub fn memview_init(memview_resource_buffer: [*]u8, buffer_size: c_ulonglong, bytes_for_stacktrace: c_ulonglong) callconv(.C) bool {
+    const opts = HostContextOpts{
+        .bytes_for_stacktrace = bytes_for_stacktrace,
         .max_instrumented_allocators = 0,
     };
 
@@ -59,13 +68,158 @@ pub fn memview_msg_alloc(address: c_ulonglong, size: c_ulonglong, region_id: c_u
     }
 }
 
+const DebugStackTraces = struct {
+    const PendingStackTrace = struct {
+        addresses: [32]usize,
+        last_index: u8,
+
+        fn slice(self: *const PendingStackTrace) []const usize {
+            return self.addresses[0..self.last_index];
+        }
+
+        fn id(self: *const PendingStackTrace) u64 {
+            return std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(self.slice()));
+        }
+    };
+
+    fba: std.heap.FixedBufferAllocator,
+    debug_info: ?*std.debug.DebugInfo,
+    known_stacks_lock: std.Thread.Mutex,
+    known_stacks: std.AutoHashMap(u64, u8), // TODO ideally don't waste needless space on u8s
+    resolve_stack_lock: std.Thread.Mutex,
+    resolve_stack: std.ArrayList(PendingStackTrace),
+
+    did_warn_no_resolve_stack_mem: bool = false,
+
+    fn init(buffer: []u8) DebugStackTraces {
+        // TODO move symbol resolution to the memview app
+        var debug_info: ?*std.debug.DebugInfo = std.debug.getSelfDebugInfo() catch |err| blk: {
+            std.log.err("[Memview] Failed to initialize debug info structures: {}. Translated stack traces will not be available. Consider ", .{err});
+            break :blk null;
+        };
+
+        var fba = std.heap.FixedBufferAllocator.init(buffer);
+        var allocator = fba.allocator();
+        var known_stacks = std.AutoHashMap(u64, u8).init(allocator);
+        var resolve_stack = std.ArrayList(PendingStackTrace).init(allocator);
+
+        const bytes_for_known_stacks = @intToFloat(f32, buffer.len - fba.end_index) * 0.1;
+        const approx_max_known_stacks = (bytes_for_known_stacks / @intToFloat(f32, @sizeOf(u64) + 1)) * (@intToFloat(f32, std.hash_map.default_max_load_percentage) / 100.0);
+        known_stacks.ensureTotalCapacity(@floatToInt(u32, approx_max_known_stacks)) catch unreachable;
+
+        const bytes_for_resolve_stack = buffer.len - fba.end_index;
+        const num_stacks = bytes_for_resolve_stack / @sizeOf(PendingStackTrace);
+        resolve_stack.ensureTotalCapacityPrecise(num_stacks - 1) catch unreachable;
+
+        return DebugStackTraces{
+            .fba = fba,
+            .debug_info = debug_info,
+            .known_stacks_lock = std.Thread.Mutex{},
+            .known_stacks = known_stacks,
+            .resolve_stack_lock = std.Thread.Mutex{},
+            .resolve_stack = resolve_stack,
+        };
+    }
+
+    fn capture(self: *DebugStackTraces, return_address: usize) u64 {
+        var pending: PendingStackTrace = undefined;
+        var stacktrace = std.builtin.StackTrace{
+            .instruction_addresses = pending.addresses[0..],
+            .index = 0,
+        };
+
+        std.debug.captureStackTrace(return_address, &stacktrace);
+        pending.last_index = @intCast(u8, stacktrace.index);
+
+        const stack_id = pending.id();
+
+        var needs_resolve: bool = true;
+        {
+            self.known_stacks_lock.lock();
+            if (self.known_stacks.contains(stack_id)) {
+                needs_resolve = false;
+            } else {
+                self.known_stacks.putAssumeCapacity(stack_id, 0);
+            }
+            self.known_stacks_lock.unlock();
+        }
+
+        if (needs_resolve) {
+            self.resolve_stack_lock.lock();
+            if (self.resolve_stack.items.len < self.resolve_stack.capacity) {
+                self.resolve_stack.appendAssumeCapacity(pending);
+            } else if (self.did_warn_no_resolve_stack_mem == false) {
+                self.did_warn_no_resolve_stack_mem = true;
+                std.log.err("[Memview] Failed to enqueue stack for resolving: not enough internal memory. Increase bytes_for_stacktrace when calling init to avoid this warning.\n", .{});
+            }
+            self.resolve_stack_lock.unlock();
+        }
+
+        return stack_id;
+    }
+
+    fn resolveNext(self: *DebugStackTraces, context: *HostContext) bool {
+        var pending: ?PendingStackTrace = null;
+        self.resolve_stack_lock.lock();
+        if (self.resolve_stack.items.len > 0) {
+            pending = self.resolve_stack.pop();
+        }
+        self.resolve_stack_lock.unlock();
+
+        if (pending) |p| {
+            var stack_string_buffer: [1024 * 4]u8 = undefined;
+            var fba = std.io.fixedBufferStream(&stack_string_buffer);
+            var writer = fba.writer();
+
+            var addresses = p.slice();
+            for (addresses) |address| {
+                var module: ?*std.debug.ModuleDebugInfo = null;
+                if (self.debug_info) |dbg| {
+                    module = dbg.getModuleForAddress(address) catch null;
+                }
+                var symbol_info: ?std.debug.SymbolInfo = null;
+                if (module) |m| {
+                    symbol_info = m.getSymbolAtAddress(self.debug_info.?.allocator, address) catch null;
+                }
+
+                if (symbol_info) |sym| {
+                    defer sym.deinit(self.debug_info.?.allocator);
+                    writeSymbolInfo(writer, address, sym.line_info, sym.symbol_name, sym.compile_unit_name) catch break;
+                } else {
+                    writeSymbolInfo(writer, address, null, "<unknown_symbol>", "<unknown_compile_unit>") catch break;
+                }
+            }
+
+            const stack_id = p.id();
+            const resolved_stack_string = stack_string_buffer[0..fba.pos];
+
+            context.msgStack(stack_id, resolved_stack_string);
+            return true;
+        }
+
+        return false;
+    }
+
+    fn writeSymbolInfo(writer: anytype, address: usize, line_info: ?std.debug.LineInfo, symbol_name: []const u8, compile_unit_name: []const u8) !void {
+        if (line_info) |*li| {
+            try writer.print("{s}:{d}:{d}", .{ li.file_name, li.line, li.column });
+        } else {
+            try writer.print("???:?:?", .{});
+        }
+
+        try writer.print(": 0x{x} in {s} ({s})\n", .{ address, symbol_name, compile_unit_name });
+    }
+};
+
 pub const HostContextOpts = struct {
     max_instrumented_allocators: u32 = 1,
+    bytes_for_stacktrace: usize = 1024 * 1024 * 2,
 };
 
 pub const HostContext = struct {
     instrumented_allocators_lock: std.Thread.Mutex,
     instrumented_allocators: std.ArrayList(InstrumentedAllocator),
+    stacks: DebugStackTraces,
     message_queue_lock: std.Thread.Mutex,
     message_queue: std.ArrayList(u8),
     socket_server: network.Socket,
@@ -82,6 +236,10 @@ pub const HostContext = struct {
         .resize = instrumentedResize,
         .free = instrumentedFree,
     };
+
+    pub fn calcMinRequiredMemory(opts: HostContextOpts) usize {
+        return @sizeOf(HostContext) + (@sizeOf(InstrumentedAllocator) * opts.max_instrumented_allocators) + opts.bytes_for_stacktrace + 256;
+    }
 
     pub fn init(buffer: []u8, opts: HostContextOpts) !*HostContext {
         const AcceptThread = struct {
@@ -109,7 +267,7 @@ pub const HostContext = struct {
             }
         };
 
-        const min_required_memory = @sizeOf(HostContext) + (@sizeOf(InstrumentedAllocator) * opts.max_instrumented_allocators) + 256;
+        const min_required_memory = calcMinRequiredMemory(opts);
         if (buffer.len < min_required_memory) {
             std.log.err("[Memview] Minimum required memory is at least {} bytes, but only {} bytes were provided.", .{ min_required_memory, buffer.len });
             return error.MoreMemoryRequired;
@@ -122,6 +280,8 @@ pub const HostContext = struct {
         context.instrumented_allocators_lock = std.Thread.Mutex{};
         context.instrumented_allocators = std.ArrayList(InstrumentedAllocator).init(allocator);
         context.instrumented_allocators.ensureTotalCapacityPrecise(opts.max_instrumented_allocators) catch unreachable;
+        context.stacks = DebugStackTraces.init(buffer[fba.end_index .. fba.end_index + opts.bytes_for_stacktrace]);
+        fba.end_index = fba.end_index + opts.bytes_for_stacktrace;
         context.message_queue_lock = std.Thread.Mutex{};
         context.message_queue = std.ArrayList(u8).init(allocator);
         context.message_queue.ensureTotalCapacityPrecise(buffer.len - fba.end_index) catch unreachable;
@@ -167,6 +327,8 @@ pub const HostContext = struct {
     }
 
     pub fn pumpMsgQueue(self: *HostContext) void {
+        while (self.stacks.resolveNext(self)) {}
+
         self.message_queue_lock.lock();
         self.pumpMsgQueueUnlocked();
         self.message_queue_lock.unlock();
@@ -217,10 +379,21 @@ pub const HostContext = struct {
         self.enqueueMsg(std.mem.asBytes(&msg));
     }
 
+    pub fn msgStack(self: *HostContext, stack_id: u64, string: []const u8) void {
+        const msg = Message{
+            .Stack = .{
+                .stack_id = stack_id,
+                .string = string,
+            },
+        };
+        self.enqueueMsg(&msg);
+    }
+
     pub fn msgAlloc(self: *HostContext, address: u64, size: u64, region_name_id: u64) void {
+        const stack_id: u64 = self.stacks.capture(@returnAddress());
         const msg = Message{
             .Alloc = .{
-                .id_hash = 0, // TODO callstack
+                .stack_id = stack_id,
                 .address = address,
                 .size = size,
                 .timestamp = getTimestamp(),

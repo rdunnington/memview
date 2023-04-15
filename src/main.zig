@@ -98,6 +98,7 @@ const MemoryStats = struct {
     const MemBlock = struct {
         address: usize,
         size: usize,
+        allocating_stack_id: u64,
 
         fn lessThan(_: void, lhs: MemBlock, rhs: MemBlock) bool {
             return lhs.address < rhs.address;
@@ -118,17 +119,25 @@ const MemoryStats = struct {
     all_messages: std.ArrayList(common.Message),
     new_messages: std.ArrayList(common.Message),
 
+    stacks: std.hash_map.AutoHashMap(u64, []const u8),
+
     cache: Cache,
 
     fn init(allocator: std.mem.Allocator) MemoryStats {
-        return MemoryStats{ .all_messages = std.ArrayList(common.Message).init(allocator), .new_messages = std.ArrayList(common.Message).init(allocator), .cache = Cache{
-            .blocks = std.ArrayList(MemBlock).init(allocator),
-        } };
+        return MemoryStats{
+            .all_messages = std.ArrayList(common.Message).init(allocator),
+            .new_messages = std.ArrayList(common.Message).init(allocator),
+            .stacks = std.hash_map.AutoHashMap(u64, []const u8).init(allocator),
+            .cache = Cache{
+                .blocks = std.ArrayList(MemBlock).init(allocator),
+            },
+        };
     }
 
     fn deinit(self: *MemoryStats) void {
         self.all_messages.deinit();
         self.new_messages.deinit();
+        self.stacks.deinit();
         self.cache.blocks.deinit();
     }
 
@@ -161,6 +170,7 @@ const MemoryStats = struct {
                         try self.cache.blocks.append(MemBlock{
                             .address = v.address,
                             .size = v.size,
+                            .allocating_stack_id = v.stack_id,
                         });
                     }
 
@@ -246,6 +256,8 @@ fn updateInput(input: *InputState) void {
 
 fn updateMessages(app: *AppContext) !void {
     try client.fetchMessages(&app.client, &app.mem_stats.new_messages);
+    try app.mem_stats.all_messages.ensureUnusedCapacity(app.mem_stats.new_messages.items.len);
+
     for (app.mem_stats.new_messages.items) |msg| {
         const timestamp = switch (msg) {
             .Frame => |v| v.timestamp,
@@ -253,20 +265,20 @@ fn updateMessages(app: *AppContext) !void {
             .Free => |v| v.timestamp,
             else => null,
         };
-        // std.debug.print("ts: {}\n", .{ts});
+
         if (timestamp) |ts| {
             app.mem_stats.first_timestamp = std.math.min(app.mem_stats.first_timestamp, ts);
             app.mem_stats.last_timestamp = std.math.max(app.mem_stats.last_timestamp, ts);
         }
+
+        switch (msg) {
+            .Stack => |v| try app.mem_stats.stacks.put(v.stack_id, v.string),
+            .Alloc => app.mem_stats.all_messages.appendAssumeCapacity(msg),
+            .Free => app.mem_stats.all_messages.appendAssumeCapacity(msg),
+            else => {},
+        }
     }
-    // temp for debugging
-    // if (app.new_messages.items.len > 0) {
-    //     std.debug.print(">>> main thread got {} messages:\n", .{app.new_messages.items.len});
-    //     // for (app.new_messages.items) |msg| {
-    //     //     std.debug.print("\t{any}\n", .{msg});
-    //     // }
-    // }
-    // temp for debugging
+
     try app.mem_stats.all_messages.appendSlice(app.mem_stats.new_messages.items);
     app.mem_stats.new_messages.clearRetainingCapacity();
 }
@@ -299,7 +311,7 @@ fn updateGui(app: *AppContext) !void {
     }
 
     zgui.setNextWindowPos(.{ .x = 0.0, .y = next_window_y, .cond = .always });
-    zgui.setNextWindowSize(.{ .w = backbuffer_width, .h = 200, .cond = .once });
+    zgui.setNextWindowSize(.{ .w = backbuffer_width, .h = 400, .cond = .once });
     zgui.setNextWindowSizeConstraints(.{ .minx = backbuffer_width, .maxx = backbuffer_width, .miny = 0, .maxy = backbuffer_height - next_window_y });
 
     const call_tree_flags = zgui.WindowFlags{
@@ -309,19 +321,41 @@ fn updateGui(app: *AppContext) !void {
     };
 
     if (zgui.begin("call_tree", .{ .flags = call_tree_flags })) {
-        if (app.mem_stats.cache.selected_block) |block| {
-            zgui.text("selected_block at 0x{X} with size {} bytes", .{ block.address, block.size });
+        const mem: *MemoryStats = &app.mem_stats;
+        if (mem.cache.selected_block) |block| {
+            zgui.text("selected_block at 0x{X} with size {} bytes, allocating callstack:", .{ block.address, block.size });
+
+            if (mem.stacks.get(block.allocating_stack_id)) |callstack| {
+                var depth: usize = 0;
+                var begin_index: usize = 0;
+                while (true) {
+                    var node_id_buffer: [64]u8 = undefined;
+                    var node_id: [:0]u8 = std.fmt.bufPrintZ(&node_id_buffer, "callstack_depth_{}", .{depth}) catch unreachable;
+
+                    var stack_frame = std.mem.sliceTo(callstack[begin_index..], '\n');
+
+                    if (stack_frame.len == 0) {
+                        break;
+                    }
+
+                    begin_index += stack_frame.len + 1; // +1 to skip newline
+
+                    if (zgui.treeNodeStrId(node_id, "{s}", .{stack_frame}) == false) {
+                        break;
+                    }
+
+                    depth += 1;
+                }
+
+                for (0..depth) |_| {
+                    zgui.treePop();
+                }
+            } else {
+                zgui.text("Unavailable.", .{});
+            }
         } else {
             zgui.textUnformatted("Select a block in the memory view to view its details.");
         }
-        // zgui.textUnformatted("Call tree goes here");
-        // if (zgui.treeNodeStrId("tree_id1", "My Tree {d}", .{1})) {
-        //     if (zgui.treeNodeStrId("tree_id2", "My Tree {d}", .{2})) {
-        //         zgui.textUnformatted("Some content...");
-        //         zgui.treePop();
-        //     }
-        //     zgui.treePop();
-        // }
         next_window_y += zgui.getWindowHeight();
         zgui.end();
     }
