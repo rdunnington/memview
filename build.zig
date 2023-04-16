@@ -40,6 +40,17 @@ pub fn build(b: *std.Build) void {
     zgpu_pkg.link(exe_memview);
     exe_memview.addModule("network", network_module);
     exe_memview.addModule("stable_array", stable_array_module);
+    exe_memview.install();
+
+    const lib_memview = b.addStaticLibrary(.{
+        .name = "memview",
+        .root_source_file = .{ .path = "src/host.zig" },
+        .target = target,
+        .optimize = optimize,
+    });
+    lib_memview.addModule("network", network_module);
+    lib_memview.installHeader("src/memview.h", "memview.h");
+    lib_memview.install();
 
     const memview_module = b.addModule("memview", .{ .source_file = .{ .path = "src/host.zig" }, .dependencies = &.{
         .{ .name = "network", .module = network_module },
@@ -51,12 +62,12 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    // exe_test_host_zig.linkLibrary(lib_memview);
     exe_test_host_zig.addModule("memview", memview_module);
 
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
     // step when running `zig build`).
-    exe_memview.install();
     exe_test_host_zig.install();
 
     // This *creates* a RunStep in the build graph, to be executed when another
@@ -100,4 +111,6 @@ pub fn build(b: *std.Build) void {
     // // running the unit tests.
     // const test_step = b.step("test", "Run unit tests");
     // test_step.dependOn(&exe_memview_tests.step);
+
+    // exe_memview.addModule("network", network_module);
 }

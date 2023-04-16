@@ -5,9 +5,9 @@ const common = @import("common.zig");
 
 const Message = common.Message;
 
-const c_context: ?*HostContext = null;
+var c_context: ?*HostContext = null;
 
-pub fn memview_calc_min_required_memory(bytes_for_stacktrace: c_ulonglong) callconv(.C) c_ulonglong {
+export fn memview_calc_min_required_memory(bytes_for_stacktrace: u64) callconv(.C) u64 {
     const opts = HostContextOpts{
         .bytes_for_stacktrace = bytes_for_stacktrace,
         .max_instrumented_allocators = 0,
@@ -15,7 +15,7 @@ pub fn memview_calc_min_required_memory(bytes_for_stacktrace: c_ulonglong) callc
     return HostContext.calcMinRequiredMemory(opts);
 }
 
-pub fn memview_init(memview_resource_buffer: [*]u8, buffer_size: c_ulonglong, bytes_for_stacktrace: c_ulonglong) callconv(.C) bool {
+export fn memview_init(memview_resource_buffer: [*]u8, buffer_size: u64, bytes_for_stacktrace: u64) callconv(.C) bool {
     const opts = HostContextOpts{
         .bytes_for_stacktrace = bytes_for_stacktrace,
         .max_instrumented_allocators = 0,
@@ -30,41 +30,54 @@ pub fn memview_init(memview_resource_buffer: [*]u8, buffer_size: c_ulonglong, by
     return true;
 }
 
-pub fn memview_deinit() callconv(.C) void {
+export fn memview_deinit() callconv(.C) void {
     if (c_context) |context| {
         context.deinit();
     }
     c_context = null;
 }
 
-pub fn memview_wait_for_connection() callconv(.C) void {
+export fn memview_wait_for_connection() callconv(.C) void {
     if (c_context) |context| {
         context.waitForConnection();
     }
 }
 
-pub fn memview_pump_message_queue() callconv(.C) void {
+export fn memview_pump_message_queue() callconv(.C) void {
     if (c_context) |context| {
         context.pumpMsgQueue();
     }
 }
 
-pub fn memview_msg_frame() callconv(.C) void {
+export fn memview_msg_frame() callconv(.C) void {
     if (c_context) |context| {
         context.msgFrame();
     }
 }
 
-pub fn memview_msg_region(address: c_ulonglong, size: c_ulonglong, name: [*]u8, name_length: c_ushort) callconv(.C) c_ulonglong { // TODO callstack
+// export fn memview_msg_region(address: u64, size: u64, name: [*]u8, name_length: c_ushort) callconv(.C) u64 { // TODO callstack
+//     if (c_context) |context| {
+//         return context.msgRegion(size, address, name[0..name_length]);
+//     }
+//     return 0;
+// }
+
+export fn memview_msg_stack(stack_id: u64, string_buffer: [*]const u8, string_length: u32) callconv(.C) void {
     if (c_context) |context| {
-        return context.msgRegion(size, address, name[0..name_length]);
+        const string = string_buffer[0..string_length];
+        context.msgStack(stack_id, string);
     }
-    return 0;
 }
 
-pub fn memview_msg_alloc(address: c_ulonglong, size: c_ulonglong, region_id: c_ulonglong) callconv(.C) void {
+export fn memview_msg_alloc(address: u64, size: u64, region_id: u64) callconv(.C) void {
     if (c_context) |context| {
         context.msgAlloc(size, address, region_id);
+    }
+}
+
+export fn memview_msg_free(address: u64) callconv(.C) void {
+    if (c_context) |context| {
+        context.msgFree(address);
     }
 }
 
@@ -365,7 +378,7 @@ pub const HostContext = struct {
                 .timestamp = getTimestamp(),
             },
         };
-        self.enqueueMsg(std.mem.asBytes(&msg));
+        self.enqueueMsg(&msg);
     }
 
     pub fn msgRegion(self: *HostContext, address: u64, size: u64, name_id: u64) void {
@@ -376,7 +389,7 @@ pub const HostContext = struct {
                 .size = size,
             },
         };
-        self.enqueueMsg(std.mem.asBytes(&msg));
+        self.enqueueMsg(&msg);
     }
 
     pub fn msgStack(self: *HostContext, stack_id: u64, string: []const u8) void {
