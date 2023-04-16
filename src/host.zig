@@ -71,7 +71,7 @@ export fn memview_msg_stack(stack_id: u64, string_buffer: [*]const u8, string_le
 
 export fn memview_msg_alloc(address: u64, size: u64, region_id: u64) callconv(.C) void {
     if (c_context) |context| {
-        context.msgAlloc(size, address, region_id);
+        context.msgAlloc(address, size, region_id);
     }
 }
 
@@ -149,23 +149,24 @@ const DebugStackTraces = struct {
         var needs_resolve: bool = true;
         {
             self.known_stacks_lock.lock();
+            defer self.known_stacks_lock.unlock();
+
             if (self.known_stacks.contains(stack_id)) {
                 needs_resolve = false;
             } else {
                 self.known_stacks.putAssumeCapacity(stack_id, 0);
             }
-            self.known_stacks_lock.unlock();
         }
 
         if (needs_resolve) {
             self.resolve_stack_lock.lock();
+            defer self.resolve_stack_lock.unlock();
             if (self.resolve_stack.items.len < self.resolve_stack.capacity) {
                 self.resolve_stack.appendAssumeCapacity(pending);
             } else if (self.did_warn_no_resolve_stack_mem == false) {
                 self.did_warn_no_resolve_stack_mem = true;
                 std.log.err("[Memview] Failed to enqueue stack for resolving: not enough internal memory. Increase bytes_for_stacktrace when calling init to avoid this warning.\n", .{});
             }
-            self.resolve_stack_lock.unlock();
         }
 
         return stack_id;
@@ -173,11 +174,13 @@ const DebugStackTraces = struct {
 
     fn resolveNext(self: *DebugStackTraces, context: *HostContext) bool {
         var pending: ?PendingStackTrace = null;
-        self.resolve_stack_lock.lock();
-        if (self.resolve_stack.items.len > 0) {
-            pending = self.resolve_stack.pop();
+        {
+            self.resolve_stack_lock.lock();
+            defer self.resolve_stack_lock.unlock();
+            if (self.resolve_stack.items.len > 0) {
+                pending = self.resolve_stack.pop();
+            }
         }
-        self.resolve_stack_lock.unlock();
 
         if (pending) |p| {
             var stack_string_buffer: [1024 * 4]u8 = undefined;
@@ -267,10 +270,12 @@ pub const HostContext = struct {
                     }
                 }
 
-                context.message_queue_lock.lock();
-                context.socket_client = client;
-                context.accept_thread = null;
-                context.message_queue_lock.unlock();
+                {
+                    context.message_queue_lock.lock();
+                    defer context.message_queue_lock.unlock();
+                    context.socket_client = client;
+                    context.accept_thread = null;
+                }
 
                 if (client.getLocalEndPoint()) |endpoint| {
                     std.log.info("[Memview] Client connected from {}.\n", .{endpoint});
@@ -343,8 +348,9 @@ pub const HostContext = struct {
         while (self.stacks.resolveNext(self)) {}
 
         self.message_queue_lock.lock();
+        defer self.message_queue_lock.unlock();
+
         self.pumpMsgQueueUnlocked();
-        self.message_queue_lock.unlock();
     }
 
     pub fn pumpMsgQueueUnlocked(self: *HostContext) void {
@@ -404,6 +410,7 @@ pub const HostContext = struct {
 
     pub fn msgAlloc(self: *HostContext, address: u64, size: u64, region_name_id: u64) void {
         const stack_id: u64 = self.stacks.capture(@returnAddress());
+        // std.debug.print("sending alloc msg with addr 0x{X}, size 0x{X}\n", .{ address, size });
         const msg = Message{
             .Alloc = .{
                 .stack_id = stack_id,
@@ -429,15 +436,18 @@ pub const HostContext = struct {
     pub fn instrument(self: *HostContext, allocator: std.mem.Allocator) ?std.mem.Allocator {
         var instrumented_allocator: ?*InstrumentedAllocator = null;
 
-        self.instrumented_allocators_lock.lock();
-        if (self.instrumented_allocators.items.len < self.instrumented_allocators.capacity) {
-            instrumented_allocator = self.instrumented_allocators.addOneAssumeCapacity();
-            instrumented_allocator.?.* = InstrumentedAllocator{
-                .context = self,
-                .allocator = allocator,
-            };
+        {
+            self.instrumented_allocators_lock.lock();
+            defer self.instrumented_allocators_lock.unlock();
+
+            if (self.instrumented_allocators.items.len < self.instrumented_allocators.capacity) {
+                instrumented_allocator = self.instrumented_allocators.addOneAssumeCapacity();
+                instrumented_allocator.?.* = InstrumentedAllocator{
+                    .context = self,
+                    .allocator = allocator,
+                };
+            }
         }
-        self.instrumented_allocators_lock.unlock();
 
         if (instrumented_allocator) |a| {
             return std.mem.Allocator{
@@ -452,15 +462,22 @@ pub const HostContext = struct {
 
     fn enqueueMsg(self: *HostContext, msg: *const Message) void {
         self.message_queue_lock.lock();
+        defer self.message_queue_lock.unlock();
+
         const bytes_left = self.message_queue.capacity - self.message_queue.items.len;
         const msg_size = msg.calcTotalSize();
+        if (self.message_queue.capacity < msg_size) {
+            std.log.warn(
+                "[Memview] Message size {} exceeds message queue size {}, no way to enqueue message. Allocate more memory to memview to avoid this.",
+                .{ msg_size, self.message_queue.capacity },
+            );
+            return;
+        }
         if (bytes_left < msg_size) {
             std.log.warn("[Memview] Not enough capacity in message queue, peforming blocking flush to avoid dropping message. Allocate more memory to memview or call pumpMsgQueue() more often to avoid this.", .{});
             self.pumpMsgQueueUnlocked();
         }
-        // std.debug.print("sending msg: {}\n", .{msg});
         msg.write(&self.message_queue);
-        self.message_queue_lock.unlock();
     }
 
     fn getTimestamp() u64 {
