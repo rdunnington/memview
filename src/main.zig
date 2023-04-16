@@ -79,6 +79,8 @@ const GuiState = struct {
     viewport_timestamp: u64 = 0,
     mem_view_address_base: u64 = 0,
 
+    is_cursor_anchored_to_end: bool = true,
+
     cursors: struct {
         arrow: *zglfw.Cursor = undefined,
         hand: *zglfw.Cursor = undefined,
@@ -585,12 +587,25 @@ fn updateGui(app: *AppContext) !void {
                     const viewport_timestamp = @intToFloat(f64, gui.viewport_timestamp - mem.first_timestamp);
                     const viewport_timestamp_end = std.math.ceil(std.math.min(viewport_timestamp + viewport_duration, timeline_duration));
                     gui.cursor_timestamp = std.math.clamp(gui.cursor_timestamp, mem.first_timestamp, mem.last_timestamp);
+
+                    if (gui.is_dragging_cursor) {
+                        gui.is_cursor_anchored_to_end = false;
+                    }
+
+                    if (gui.is_cursor_anchored_to_end) {
+                        gui.cursor_timestamp = mem.last_timestamp;
+                    }
+
                     var cursor_timestamp = std.math.clamp(@intToFloat(f64, gui.cursor_timestamp - mem.first_timestamp), viewport_timestamp, viewport_timestamp_end);
 
                     var cursor_x = ((cursor_timestamp - viewport_timestamp) / viewport_duration) * timeline_width;
 
-                    if (input.isMouseDown(.left) == false) {
+                    if (input.isMouseDown(.left) == false and gui.is_dragging_cursor) {
                         gui.is_dragging_cursor = false;
+
+                        if (gui.mouse_pos_x / timeline_width > 0.95) {
+                            gui.is_cursor_anchored_to_end = true;
+                        }
                     }
 
                     const is_mouse_hovering_cursor = gui.mouse_pos_y >= viewport_timeline_y_min and
@@ -814,6 +829,13 @@ fn updateGui(app: *AppContext) !void {
                     const mem_view_address_begin = gui.mem_view_address_base;
                     const mem_view_address_end = mem_view_address_begin + @floatToInt(u64, std.math.ceil(address_space_zoomed));
 
+                    const COLOR_MEM_BLOCKS = [_]u32{0xFF56B759};//, 0xFF3B7F3E, 0xFFB58055};
+                    // 0xFF3B7F3E
+
+                    var selected_block_x_start: ?f64 = null;
+                    var selected_block_x_end: f64 = 0.0;
+
+                    var color_index: usize = 0;
                     for (cache.blocks.items) |*block| {
                         const block_start_address = block.address;
                         const block_end_address = block.address + block.size;
@@ -836,23 +858,39 @@ fn updateGui(app: *AppContext) !void {
                             }
                         }
 
+                        const color = COLOR_MEM_BLOCKS[color_index % COLOR_MEM_BLOCKS.len];
+                        color_index += 1;
                         draw_list.addRectFilled(
                             .{
                                 .pmin = .{ @floatCast(f32, block_x_start), mem_viewport_blocks_y_min },
                                 .pmax = .{ @floatCast(f32, block_x_end), mem_viewport_blocks_y_max },
-                                .col = 0xFF56B759,
+                                .col = color,
                             },
                         );
 
                         if (cache.selected_block == block) {
+                            selected_block_x_start = block_x_start;
+                            selected_block_x_end = block_x_end;
+                        } else {
                             draw_list.addRect(
                                 .{
                                     .pmin = .{ @floatCast(f32, block_x_start), mem_viewport_blocks_y_min },
                                     .pmax = .{ @floatCast(f32, block_x_end), mem_viewport_blocks_y_max },
-                                    .col = 0xFFFFFFFF,
+                                    .col = 0xFFB58055,
                                 },
                             );
                         }
+                    }
+
+                    // draw selection after all other blocks have been drawn to avoid other blocks drawing on top of the left/right edges
+                    if (selected_block_x_start) |x_start| {
+                        draw_list.addRect(
+                            .{
+                                .pmin = .{ @floatCast(f32, x_start), mem_viewport_blocks_y_min },
+                                .pmax = .{ @floatCast(f32, selected_block_x_end), mem_viewport_blocks_y_max },
+                                .col = 0xFFFFFFFF,
+                            },
+                        );
                     }
                 }
 
@@ -951,15 +989,15 @@ pub fn main() !void {
     glfwSetWindowUserPointer(window, app);
 
     ///// DEBUG ONLY END
-    const RunChildThreadHelper = struct {
-        fn ThreadFunc(_allocator: *std.mem.Allocator) !void {
-            const argv = [_][]const u8{ "zig-out/bin/test_host_zig.exe", "test/the_blue_castle.txt" };
-            var test_process = std.process.Child.init(&argv, _allocator.*);
-            try test_process.spawn();
-            _ = try test_process.wait();
-        }
-    };
-    _ = try std.Thread.spawn(.{}, RunChildThreadHelper.ThreadFunc, .{&allocator});
+    // const RunChildThreadHelper = struct {
+    //     fn ThreadFunc(_allocator: *std.mem.Allocator) !void {
+    //         const argv = [_][]const u8{ "zig-out/bin/test_host_zig.exe", "test/the_blue_castle.txt" };
+    //         var test_process = std.process.Child.init(&argv, _allocator.*);
+    //         try test_process.spawn();
+    //         _ = try test_process.wait();
+    //     }
+    // };
+    // _ = try std.Thread.spawn(.{}, RunChildThreadHelper.ThreadFunc, .{&allocator});
     /////
 
     while (!window.shouldClose() and window.getKey(.escape) != .press) {

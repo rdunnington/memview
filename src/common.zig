@@ -162,7 +162,7 @@ pub const Message = union(MessageType) {
                 .Stack => {
                     const stack_id = reader.readIntLittle(u64) catch break;
                     const str = try readstr(&fbs, strpool) orelse break;
-                    std.debug.print("got stack msg with id 0x{X} and str:\n\t{s}\n", .{ stack_id, str });
+                    // std.debug.print("got stack msg with id 0x{X} and str:\n\t{s}\n", .{ stack_id, str });
                     msg = Message{
                         .Stack = .{
                             .stack_id = stack_id,
