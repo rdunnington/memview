@@ -4,7 +4,7 @@ const StringPool = @import("stringpool.zig");
 // pub const MessageChannel = std.event.Channel(Message);
 
 pub const MessageType = enum(u8) {
-    Identifier,
+    StringId,
     Region,
     Frame,
     Stack,
@@ -13,7 +13,7 @@ pub const MessageType = enum(u8) {
 };
 
 // Used for strings such as regions and callstacks
-pub const Identifier = struct {
+pub const StringId = struct {
     name: []const u8,
 
     pub fn calcHash(str: []const u8) u64 {
@@ -42,7 +42,7 @@ pub const Alloc = struct {
     address: u64,
     size: u64,
     timestamp: u64,
-    region: u64,
+    tag_string_id: u64,
 };
 
 pub const Free = struct {
@@ -51,7 +51,7 @@ pub const Free = struct {
 };
 
 pub const Message = union(MessageType) {
-    Identifier: Identifier,
+    StringId: StringId,
     Region: Region,
     Frame: Frame,
     Stack: Stack,
@@ -64,7 +64,7 @@ pub const Message = union(MessageType) {
 
     fn calcBodySize(self: *const Message) usize {
         return switch (self.*) {
-            .Identifier => |v| v.name.len + @sizeOf(u16), // identifier lengths are never longer than a u16 can hold
+            .StringId => |v| v.name.len + @sizeOf(u16), // StringId lengths are never longer than a u16 can hold
             .Region => @sizeOf(u64) * 3,
             .Frame => @sizeOf(u64),
             .Stack => |v| @sizeOf(u64) + @sizeOf(u16) + v.string.len,
@@ -82,7 +82,7 @@ pub const Message = union(MessageType) {
         writer.writeIntLittle(u16, msg_size) catch unreachable;
 
         switch (self.*) {
-            .Identifier => |v| {
+            .StringId => |v| {
                 writer.writeIntLittle(u16, @intCast(u16, v.name.len)) catch unreachable;
                 _ = writer.write(v.name) catch unreachable;
             },
@@ -104,7 +104,7 @@ pub const Message = union(MessageType) {
                 writer.writeIntLittle(u64, v.address) catch unreachable;
                 writer.writeIntLittle(u64, v.size) catch unreachable;
                 writer.writeIntLittle(u64, v.timestamp) catch unreachable;
-                writer.writeIntLittle(u64, v.region) catch unreachable;
+                writer.writeIntLittle(u64, v.tag_string_id) catch unreachable;
             },
             .Free => |v| {
                 writer.writeIntLittle(u64, v.address) catch unreachable;
@@ -131,10 +131,10 @@ pub const Message = union(MessageType) {
             var msg: Message = undefined;
 
             switch (msg_type) {
-                .Identifier => {
+                .StringId => {
                     const str = try readstr(&fbs, strpool) orelse break;
                     msg = Message{
-                        .Identifier = .{
+                        .StringId = .{
                             .name = str,
                         },
                     };
@@ -175,14 +175,14 @@ pub const Message = union(MessageType) {
                     const address = reader.readIntLittle(u64) catch break;
                     const size = reader.readIntLittle(u64) catch break;
                     const timestamp = reader.readIntLittle(u64) catch break;
-                    const region = reader.readIntLittle(u64) catch break;
+                    const tag_string_id = reader.readIntLittle(u64) catch break;
                     msg = Message{
                         .Alloc = .{
                             .stack_id = stack_id,
                             .address = address,
                             .size = size,
                             .timestamp = timestamp,
-                            .region = region,
+                            .tag_string_id = tag_string_id,
                         },
                     };
                 },

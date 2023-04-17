@@ -55,14 +55,14 @@ export fn memview_msg_frame() callconv(.C) void {
     }
 }
 
-// export fn memview_msg_region(address: u64, size: u64, name: [*]u8, name_length: c_ushort) callconv(.C) u64 { // TODO callstack
-//     if (c_context) |context| {
-//         return context.msgRegion(size, address, name[0..name_length]);
-//     }
-//     return 0;
-// }
+export fn memview_msg_stringid(name: [*]const u8, name_length: u64) callconv(.C) u64 {
+    if (c_context) |context| {
+        return context.msgStringId(name[0..name_length]);
+    }
+    return 0;
+}
 
-export fn memview_msg_stack(stack_id: u64, string_buffer: [*]const u8, string_length: u32) callconv(.C) void {
+export fn memview_msg_stack(stack_id: u64, string_buffer: [*]const u8, string_length: u64) callconv(.C) void {
     if (c_context) |context| {
         const string = string_buffer[0..string_length];
         context.msgStack(stack_id, string);
@@ -366,15 +366,15 @@ pub const HostContext = struct {
         self.message_queue.clearRetainingCapacity();
     }
 
-    pub fn msgId(self: *HostContext, name: []u8) u64 {
+    pub fn msgStringId(self: *HostContext, name: []const u8) u64 {
         const msg = Message{
-            .Identifier = .{
+            .StringId = .{
                 .name = name,
             },
         };
         self.enqueueMsg(&msg);
 
-        const name_id = common.Identifier.calcHash(name);
+        const name_id = common.StringId.calcHash(name);
         return name_id;
     }
 
@@ -408,7 +408,7 @@ pub const HostContext = struct {
         self.enqueueMsg(&msg);
     }
 
-    pub fn msgAlloc(self: *HostContext, address: u64, size: u64, region_name_id: u64) void {
+    pub fn msgAlloc(self: *HostContext, address: u64, size: u64, tag_string_id: u64) void {
         const stack_id: u64 = self.stacks.capture(@returnAddress());
         // std.debug.print("sending alloc msg with addr 0x{X}, size 0x{X}\n", .{ address, size });
         const msg = Message{
@@ -417,7 +417,7 @@ pub const HostContext = struct {
                 .address = address,
                 .size = size,
                 .timestamp = getTimestamp(),
-                .region = region_name_id,
+                .tag_string_id = tag_string_id,
             },
         };
         self.enqueueMsg(&msg);

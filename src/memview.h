@@ -13,7 +13,8 @@ void memview_deinit();
 void memview_wait_for_connection();
 void memview_pump_message_queue();
 void memview_msg_frame();
-void memview_msg_stack(uint64_t stack_id, const uint8_t* string_buffer, unsigned string_length);
+uint64_t memview_msg_stringid(const uint8_t* string_buffer, uint64_t string_length);
+void memview_msg_stack(uint64_t stack_id, const uint8_t* string_buffer, uint64_t string_length);
 void memview_msg_alloc(uint64_t address, uint64_t size, uint64_t region_id);
 void memview_msg_free(uint64_t address);
 
