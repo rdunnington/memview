@@ -58,6 +58,11 @@ const InputState = struct {
 };
 
 const GuiState = struct {
+    const TagColor = struct {
+        tag: u64,
+        color: u32,
+    };
+
     mouse_pos_x: f64 = 0.0,
     mouse_pos_y: f64 = 0.0,
     mouse_delta_x: f64 = 0.0,
@@ -86,6 +91,25 @@ const GuiState = struct {
         hand: *zglfw.Cursor = undefined,
     },
 
+    tag_to_color: std.ArrayList(TagColor),
+    next_tag_color_index: u8 = 0,
+
+    // saturation 68, value 60
+    const color_table = [_]u32{
+        0xFF33A533,
+        // 0xFF6AA332,
+        0xFFA0A031,
+        0xFF9E6731,
+        0xFF9B3131,
+        0xFF993064,
+        0xFF993099,
+        0xFF643099,
+        0xFF3333AF,
+        0xFF3470AD,
+        0xFF34AAAA,
+        0xFF34A86E,
+    };
+
     fn tweenZoom(zoom: f32, zoom_target: f32) f32 {
         var zoom_diff: f32 = zoom_target - zoom;
         if (zm.abs(zoom_diff) < 0.01) {
@@ -94,12 +118,22 @@ const GuiState = struct {
             return zoom + (0.5 * zoom_diff);
         }
     }
+
+    fn findColorForTag(self: *const GuiState, tag: u64) ?u32 {
+        for (self.tag_to_color.items) |v| {
+            if (v.tag == tag) {
+                return v.color;
+            }
+        }
+        return null;
+    }
 };
 
 const MemoryStats = struct {
     const MemBlock = struct {
         address: usize,
         size: usize,
+        tag: u64,
         allocating_stack_id: u64,
 
         fn lessThan(_: void, lhs: MemBlock, rhs: MemBlock) bool {
@@ -121,6 +155,7 @@ const MemoryStats = struct {
     all_messages: std.ArrayList(common.Message),
     new_messages: std.ArrayList(common.Message),
 
+    stringids: std.hash_map.AutoHashMap(u64, []const u8),
     stacks: std.hash_map.AutoHashMap(u64, []const u8),
 
     cache: Cache,
@@ -129,6 +164,7 @@ const MemoryStats = struct {
         return MemoryStats{
             .all_messages = std.ArrayList(common.Message).init(allocator),
             .new_messages = std.ArrayList(common.Message).init(allocator),
+            .stringids = std.hash_map.AutoHashMap(u64, []const u8).init(allocator),
             .stacks = std.hash_map.AutoHashMap(u64, []const u8).init(allocator),
             .cache = Cache{
                 .blocks = std.ArrayList(MemBlock).init(allocator),
@@ -139,6 +175,7 @@ const MemoryStats = struct {
     fn deinit(self: *MemoryStats) void {
         self.all_messages.deinit();
         self.new_messages.deinit();
+        self.stringids.deinit();
         self.stacks.deinit();
         self.cache.blocks.deinit();
     }
@@ -172,6 +209,7 @@ const MemoryStats = struct {
                         try self.cache.blocks.append(MemBlock{
                             .address = v.address,
                             .size = v.size,
+                            .tag = v.tag_string_id,
                             .allocating_stack_id = v.stack_id,
                         });
                     }
@@ -216,7 +254,10 @@ const AppContext = struct {
         app.client = try ClientContext.init(allocator);
         app.mem_stats = MemoryStats.init(allocator);
         app.input = InputState{};
-        app.gui = GuiState{ .cursors = .{} };
+        app.gui = GuiState{
+            .cursors = .{},
+            .tag_to_color = std.ArrayList(GuiState.TagColor).init(allocator),
+        };
 
         app.gui.cursors.arrow = try zglfw.Cursor.createStandard(.arrow);
         app.gui.cursors.hand = try zglfw.Cursor.createStandard(.hand);
@@ -246,6 +287,7 @@ const AppContext = struct {
         zgui.deinit();
         self.client.deinit();
         self.mem_stats.deinit();
+        self.gui.tag_to_color.deinit();
     }
 };
 
@@ -274,6 +316,7 @@ fn updateMessages(app: *AppContext) !void {
         }
 
         switch (msg) {
+            .StringId => |v| try app.mem_stats.stringids.put(common.StringId.calcHash(v.name), v.name),
             .Stack => |v| try app.mem_stats.stacks.put(v.stack_id, v.string),
             .Alloc => app.mem_stats.all_messages.appendAssumeCapacity(msg),
             .Free => app.mem_stats.all_messages.appendAssumeCapacity(msg),
@@ -325,7 +368,8 @@ fn updateGui(app: *AppContext) !void {
     if (zgui.begin("call_tree", .{ .flags = call_tree_flags })) {
         const mem: *MemoryStats = &app.mem_stats;
         if (mem.cache.selected_block) |block| {
-            zgui.text("selected_block at 0x{X} with size {} bytes, allocating callstack:", .{ block.address, block.size });
+            const tag_string = mem.stringids.get(block.tag) orelse "none";
+            zgui.text("selected_block at 0x{X} with size {} bytes and tag '{s}', allocating callstack:", .{ block.address, block.size, tag_string });
 
             if (mem.stacks.get(block.allocating_stack_id)) |callstack| {
                 var depth: usize = 0;
@@ -603,7 +647,7 @@ fn updateGui(app: *AppContext) !void {
                     if (input.isMouseDown(.left) == false and gui.is_dragging_cursor) {
                         gui.is_dragging_cursor = false;
 
-                        if (gui.mouse_pos_x / timeline_width > 0.95) {
+                        if (gui.mouse_pos_x / timeline_width > 0.98) {
                             gui.is_cursor_anchored_to_end = true;
                         }
                     }
@@ -829,13 +873,9 @@ fn updateGui(app: *AppContext) !void {
                     const mem_view_address_begin = gui.mem_view_address_base;
                     const mem_view_address_end = mem_view_address_begin + @floatToInt(u64, std.math.ceil(address_space_zoomed));
 
-                    const COLOR_MEM_BLOCKS = [_]u32{0xFF56B759};//, 0xFF3B7F3E, 0xFFB58055};
-                    // 0xFF3B7F3E
-
                     var selected_block_x_start: ?f64 = null;
                     var selected_block_x_end: f64 = 0.0;
 
-                    var color_index: usize = 0;
                     for (cache.blocks.items) |*block| {
                         const block_start_address = block.address;
                         const block_end_address = block.address + block.size;
@@ -855,11 +895,19 @@ fn updateGui(app: *AppContext) !void {
                         if (is_mouse_in_mem_viewport and input.isMouseDown(.left) and gui.mouse_pos_x >= block_x_start and gui.mouse_pos_x <= block_x_end) {
                             if (gui.is_dragging_cursor == false and gui.viewport_drag_focus == null) {
                                 cache.selected_block = block;
+                                gui.is_cursor_anchored_to_end = false;
                             }
                         }
 
-                        const color = COLOR_MEM_BLOCKS[color_index % COLOR_MEM_BLOCKS.len];
-                        color_index += 1;
+                        // 0xFF56B759
+                        if (gui.findColorForTag(block.tag) == null) {
+                            const color = GuiState.color_table[gui.next_tag_color_index];
+                            try gui.tag_to_color.append(GuiState.TagColor{ .tag = block.tag, .color = color });
+
+                            gui.next_tag_color_index = @intCast(u8, (gui.next_tag_color_index + 1) % GuiState.color_table.len);
+                        }
+                        var color: u32 = gui.findColorForTag(block.tag).?;
+
                         draw_list.addRectFilled(
                             .{
                                 .pmin = .{ @floatCast(f32, block_x_start), mem_viewport_blocks_y_min },
@@ -871,14 +919,6 @@ fn updateGui(app: *AppContext) !void {
                         if (cache.selected_block == block) {
                             selected_block_x_start = block_x_start;
                             selected_block_x_end = block_x_end;
-                        } else {
-                            draw_list.addRect(
-                                .{
-                                    .pmin = .{ @floatCast(f32, block_x_start), mem_viewport_blocks_y_min },
-                                    .pmax = .{ @floatCast(f32, block_x_end), mem_viewport_blocks_y_max },
-                                    .col = 0xFFB58055,
-                                },
-                            );
                         }
                     }
 
